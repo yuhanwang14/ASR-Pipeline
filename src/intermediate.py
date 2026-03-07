@@ -28,9 +28,7 @@ def _serialize_value(value: Any) -> Any:
     return str(value)
 
 
-def save_stage_result(
-    stage_name: str, data: dict[str, Any], output_dir: str | Path
-) -> None:
+def save_stage_result(stage_name: str, data: dict[str, Any], output_dir: str | Path) -> None:
     """
     Save stage result to JSON with numpy/tensor conversion.
 

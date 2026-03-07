@@ -1,13 +1,9 @@
 """Tests for audio preprocessing."""
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
 import pytest
 import torch
 
 from src.audio_preprocessing import load_audio, save_temp_wav, slice_waveform
-
 
 # Mark audio loading tests as integration since they require ffmpeg
 pytestmark = pytest.mark.integration
@@ -27,7 +23,6 @@ class TestLoadAudio:
 
         # Create a simple mono audio file
         sample_rate = 16000
-        duration_sec = 1
         waveform = torch.sin(2 * 3.14159 * 440 * torch.arange(sample_rate) / sample_rate)
         waveform = waveform.unsqueeze(0)  # (1, N)
 

@@ -4,7 +4,13 @@
       "WebSearch",
       "Bash(npx skills:*)",
       "Bash(git:*)",
-      "Skill(python-code-quality)"
+      "Skill(python-code-quality)",
+      "Bash(gh:*)",
+      "Bash(curl:*)",
+      "Bash(conda install:*)",
+      "Bash(/home/yuhanwang/.local/bin/uv run:*)",
+      "Bash(/home/yuhanwang/.local/bin/uv pip:*)",
+      "Bash(uv run:*)"
     ]
   }
 }

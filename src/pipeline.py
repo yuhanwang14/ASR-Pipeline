@@ -1,6 +1,5 @@
 """Main pipeline orchestrator."""
 
-import json
 import logging
 import time
 from pathlib import Path
@@ -10,7 +9,6 @@ from src.audio_preprocessing import load_audio
 from src.config import load_config
 from src.gpu_utils import get_vram_usage
 from src.intermediate import get_completed_stages, load_stage_result, save_stage_result
-
 
 logger = logging.getLogger("asr_pipeline")
 
@@ -130,9 +128,7 @@ def run_pipeline(
             logger.info("Running Stage 3: LLM Post-Processing...")
             vram_before = get_vram_usage()
             t0 = time.perf_counter()
-            stage_3_result = _run_stage_3(
-                stage_2_result, sample_rate, config
-            )
+            stage_3_result = _run_stage_3(stage_2_result, sample_rate, config)
             timings["stage_3"] = time.perf_counter() - t0
             vram_after = get_vram_usage()
             logger.info(
@@ -144,6 +140,11 @@ def run_pipeline(
             stage_3_result = load_stage_result("stage_3", output_dir)
 
         pipeline_result["stages"]["llm_postprocess"] = stage_3_result
+
+        # Expose final segments and summary at top level for output formatters
+        pipeline_result["segments"] = stage_3_result.get("segments", [])
+        pipeline_result["summary"] = stage_3_result.get("summary")
+        pipeline_result["warnings"] = stage_3_result.get("warnings", [])
         pipeline_result["timings"] = timings
         pipeline_result["total_time_seconds"] = sum(timings.values())
 
@@ -155,45 +156,56 @@ def run_pipeline(
         raise
 
 
-def _run_stage_0(
-    waveform, sample_rate: int, config: dict
-) -> dict[str, Any]:
-    """
-    Stage 0: Voice Activity Detection.
+def _run_stage_0(waveform, sample_rate: int, config: dict) -> dict[str, Any]:
+    """Stage 0: Voice Activity Detection."""
+    from src.vad import run_vad
 
-    TODO: Implement VAD with Silero VAD v5.
-    """
-    raise NotImplementedError("Stage 0 (VAD) not yet implemented")
-
-
-def _run_stage_1(
-    waveform, sample_rate: int, config: dict
-) -> dict[str, Any]:
-    """
-    Stage 1: Speaker Diarization.
-
-    TODO: Implement diarization with pyannote.audio and WeSpeaker.
-    """
-    raise NotImplementedError("Stage 1 (Diarization) not yet implemented")
+    clean_waveform, timestamp_map, speech_segments = run_vad(waveform, sample_rate, config)
+    return {
+        "speech_segments": speech_segments,
+        "timestamp_map": timestamp_map,
+        "clean_waveform_samples": clean_waveform.shape[1],
+    }
 
 
-def _run_stage_2(
-    waveform, sample_rate: int, config: dict
-) -> dict[str, Any]:
-    """
-    Stage 2: Speech-to-Text Transcription.
+def _run_stage_1(waveform, sample_rate: int, config: dict) -> dict[str, Any]:
+    """Stage 1: Speaker Diarization."""
+    from src.diarization import run_diarization
+    from src.gpu_utils import gpu_stage
+    from src.speaker_registry import match_speakers
 
-    TODO: Implement ASR with Qwen3-ASR.
-    """
-    raise NotImplementedError("Stage 2 (ASR) not yet implemented")
+    with gpu_stage("Diarization", required_mb=1000):
+        segments = run_diarization(waveform, sample_rate, config)
+
+    # Match speakers against enrolled profiles
+    segments = match_speakers(segments, config)
+
+    return {"segments": segments}
 
 
-def _run_stage_3(
-    segments: list[dict], sample_rate: int, config: dict
-) -> dict[str, Any]:
-    """
-    Stage 3: LLM Post-Processing.
+def _run_stage_2(waveform, sample_rate: int, config: dict) -> dict[str, Any]:
+    """Stage 2: Speech-to-Text Transcription."""
+    from src.gpu_utils import gpu_stage
+    from src.transcription import run_transcription
 
-    TODO: Implement LLM post-processing with Qwen3.5-9B.
-    """
-    raise NotImplementedError("Stage 3 (LLM) not yet implemented")
+    # Use diarization segments from stage 1
+    stage_1 = load_stage_result("stage_1", config.get("output", {}).get("output_dir", "output/"))
+    segments = stage_1["segments"] if stage_1 else []
+
+    with gpu_stage("ASR", required_mb=1500):
+        transcript_segments = run_transcription(waveform, sample_rate, segments, config)
+
+    return {"segments": transcript_segments}
+
+
+def _run_stage_3(stage_2_result, sample_rate: int, config: dict) -> dict[str, Any]:
+    """Stage 3: LLM Post-Processing."""
+    from src.gpu_utils import gpu_stage
+    from src.llm_postprocess import run_llm_postprocess
+
+    segments = stage_2_result.get("segments", [])
+
+    with gpu_stage("LLM", required_mb=5000):
+        result = run_llm_postprocess(segments, config)
+
+    return result
