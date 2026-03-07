@@ -345,3 +345,61 @@ class TestStage3LLM:
         # Sanity: result should have segments
         assert "segments" in result, "LLM result missing 'segments'"
         assert len(result["segments"]) > 0, "LLM produced no output segments"
+
+
+# ---------------------------------------------------------------------------
+# Full pipeline E2E test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gpu
+@requires_cuda
+@requires_hf_token
+@requires_test_audio
+@requires_gguf
+class TestFullPipelineVRAM:
+    """End-to-end pipeline on real audio with real models.
+
+    Verifies:
+    - Pipeline completes without OOM
+    - Output segments are non-empty
+    - VRAM is released after pipeline finishes
+    """
+
+    def test_full_pipeline_vram_budget(self, test_audio_path, gpu_config):
+        from src.pipeline import run_pipeline
+
+        output_dir = gpu_config["output"]["output_dir"]
+
+        with VRAMMonitor(poll_interval=0.1) as monitor:
+            result = run_pipeline(
+                str(test_audio_path),
+                config=gpu_config,
+                output_dir=output_dir,
+            )
+
+        peak = monitor.peak_delta_mb
+        print(f"\n[Full Pipeline] Peak VRAM delta: {peak:.0f} MB")
+        print(f"[Full Pipeline] Total time: {result.get('total_time_seconds', 0):.1f}s")
+        assert peak < VRAM_CEILING_PIPELINE, (
+            f"Pipeline peak VRAM {peak:.0f}MB exceeded {VRAM_CEILING_PIPELINE}MB ceiling"
+        )
+
+        # Verify VRAM released after pipeline
+        after_pipeline = get_gpu_memory_used_mb() - monitor.baseline_mb
+        print(f"[Full Pipeline] VRAM after pipeline: {after_pipeline:.0f} MB above baseline")
+        assert after_pipeline < VRAM_CEILING_AFTER_UNLOAD, (
+            f"VRAM after pipeline {after_pipeline:.0f}MB exceeded {VRAM_CEILING_AFTER_UNLOAD}MB"
+        )
+
+        # Sanity checks on pipeline output
+        assert "segments" in result, "Pipeline result missing 'segments'"
+        assert len(result["segments"]) > 0, "Pipeline produced no segments"
+        assert result.get("total_time_seconds", 0) > 0, "Pipeline timing not recorded"
+
+        # All stages should have run
+        stages = result.get("stages", {})
+        assert "vad" in stages, "VAD stage missing from result"
+        assert "diarization" in stages, "Diarization stage missing from result"
+        assert "transcription" in stages, "Transcription stage missing from result"
+        assert "llm_postprocess" in stages, "LLM stage missing from result"
