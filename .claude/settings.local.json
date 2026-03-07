@@ -9,7 +9,8 @@
       "Bash(curl:*)",
       "Bash(conda install:*)",
       "Bash(/home/yuhanwang/.local/bin/uv run:*)",
-      "Bash(/home/yuhanwang/.local/bin/uv pip:*)"
+      "Bash(/home/yuhanwang/.local/bin/uv pip:*)",
+      "Bash(uv run:*)"
     ]
   }
 }
