@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-import torch
 
 from src.gpu_utils import (
     check_vram_available,
@@ -69,9 +68,7 @@ class TestCheckVramAvailable:
     def test_check_vram_sufficient(self):
         """Test when VRAM is sufficient."""
         with patch("torch.cuda.is_available", return_value=True):
-            with patch(
-                "torch.cuda.get_device_properties"
-            ) as mock_props:
+            with patch("torch.cuda.get_device_properties") as mock_props:
                 mock_props.return_value.total_memory = 8 * 1024 * 1024 * 1024
                 with patch("torch.cuda.memory_allocated", return_value=0):
                     # Should not raise
@@ -80,9 +77,7 @@ class TestCheckVramAvailable:
     def test_check_vram_insufficient(self):
         """Test when VRAM is insufficient."""
         with patch("torch.cuda.is_available", return_value=True):
-            with patch(
-                "torch.cuda.get_device_properties"
-            ) as mock_props:
+            with patch("torch.cuda.get_device_properties") as mock_props:
                 mock_props.return_value.total_memory = 1 * 1024 * 1024 * 1024
                 with patch("torch.cuda.memory_allocated", return_value=0):
                     with pytest.raises(RuntimeError, match="Insufficient VRAM"):
@@ -113,9 +108,7 @@ class TestGpuStageContext:
     def test_gpu_stage_logs_vram_after_exit(self, capsys):
         """Test that gpu_stage logs VRAM after exiting."""
         with patch("src.gpu_utils.check_vram_available"):
-            with patch(
-                "src.gpu_utils.get_vram_usage", side_effect=[100.0, 150.0]
-            ):
+            with patch("src.gpu_utils.get_vram_usage", side_effect=[100.0, 150.0]):
                 with gpu_stage("test", 500):
                     pass
                 captured = capsys.readouterr()

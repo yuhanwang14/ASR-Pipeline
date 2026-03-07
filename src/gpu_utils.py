@@ -1,8 +1,8 @@
 """GPU memory management utilities."""
 
 import gc
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator
 
 import torch
 

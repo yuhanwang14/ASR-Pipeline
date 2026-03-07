@@ -1,10 +1,6 @@
 """Tests for intermediate result serialization."""
 
-import json
-from pathlib import Path
-
 import numpy as np
-import pytest
 import torch
 
 from src.intermediate import (
