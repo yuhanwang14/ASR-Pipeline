@@ -30,10 +30,15 @@ class VLLMBackend:
         from qwen_asr import Qwen3ASRModel  # Lazy import
 
         asr_config = self.config["asr"]
+        vllm_kwargs = {}
+        for key in ("gpu_memory_utilization", "max_model_len", "enforce_eager"):
+            if key in asr_config:
+                vllm_kwargs[key] = asr_config[key]
+        vllm_kwargs.setdefault("gpu_memory_utilization", 0.7)
         self.model = Qwen3ASRModel.LLM(
             model=asr_config["model"],
-            gpu_memory_utilization=asr_config.get("gpu_memory_utilization", 0.7),
             max_new_tokens=asr_config.get("max_new_tokens", 4096),
+            **vllm_kwargs,
         )
         logger.info("Loaded Qwen3-ASR via vLLM backend")
 
@@ -45,11 +50,17 @@ class VLLMBackend:
 
     def unload(self) -> None:
         """Unload model and free GPU memory."""
-        from src.gpu_utils import unload_model  # Lazy import
+        import gc
+
+        import torch
 
         if self.model is not None:
-            unload_model(self.model)
+            del self.model
             self.model = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             logger.info("Unloaded Qwen3-ASR vLLM backend")
 
 
@@ -61,7 +72,7 @@ class TransformersBackend:
 
     def __init__(self, config: dict) -> None:
         self.config = config
-        self.model = None
+        self.model = None  # Qwen3ASRModel wrapper
 
     def load(self) -> None:
         """Load Qwen3-ASR model via transformers."""
@@ -74,10 +85,15 @@ class TransformersBackend:
 
         self.model = Qwen3ASRModel.from_pretrained(
             asr_config["model"],
-            dtype=dtype,
-            device_map="cuda:0",
+            torch_dtype=dtype,
             max_new_tokens=asr_config.get("max_new_tokens", 4096),
         )
+        # Move inner HF model to GPU without accelerate hooks
+        # so .cpu() works cleanly during unload
+        if torch.cuda.is_available() and hasattr(self.model, "model"):
+            self.model.model = self.model.model.to("cuda:0")
+            self.model.device = torch.device("cuda:0")
+            self.model.dtype = dtype
         logger.info("Loaded Qwen3-ASR via transformers backend")
 
     def transcribe(self, audio_path: str) -> str:
@@ -88,11 +104,22 @@ class TransformersBackend:
 
     def unload(self) -> None:
         """Unload model and free GPU memory."""
-        from src.gpu_utils import unload_model  # Lazy import
+        import gc
+
+        import torch
 
         if self.model is not None:
-            unload_model(self.model)
+            # Move inner model to CPU to release VRAM, then delete everything
+            inner = getattr(self.model, "model", None)
+            if inner is not None:
+                inner.cpu()
+            del inner
+            del self.model
             self.model = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             logger.info("Unloaded Qwen3-ASR transformers backend")
 
 
