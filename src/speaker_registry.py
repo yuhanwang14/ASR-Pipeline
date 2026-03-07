@@ -32,15 +32,15 @@ def enroll_speaker(name: str, audio_paths: list[str], config: dict) -> None:
         ValueError: If audio_paths is empty.
         FileNotFoundError: If any audio file does not exist.
     """
-    import torch
-    from pyannote.audio import Inference, Model
-
     if not audio_paths:
         raise ValueError("At least one audio file is required for enrollment.")
 
     for p in audio_paths:
         if not Path(p).exists():
             raise FileNotFoundError(f"Audio file not found: {p}")
+
+    import torch
+    from pyannote.audio import Inference, Model
 
     diar_cfg = config.get("diarization", {})
     embedding_model_name = diar_cfg.get(

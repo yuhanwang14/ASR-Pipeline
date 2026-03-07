@@ -1,5 +1,6 @@
 """Tests for the speaker registry module."""
 
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -47,17 +48,20 @@ class TestEnrollSpeaker:
         mock_inference = MagicMock()
         mock_inference.return_value = fake_embedding
 
+        mock_pyannote_audio = MagicMock()
+        mock_pyannote_audio.Model.from_pretrained.return_value = mock_model
+        mock_pyannote_audio.Inference.return_value = mock_inference
+
         audio_file = tmp_path / "sample.wav"
         audio_file.touch()
 
         with (
-            patch("pyannote.audio.Model") as mock_model_cls,
-            patch("pyannote.audio.Inference", return_value=mock_inference),
-            patch("torch.cuda.is_available", return_value=False),
+            patch.dict(
+                sys.modules,
+                {"pyannote": MagicMock(), "pyannote.audio": mock_pyannote_audio},
+            ),
             patch("src.gpu_utils.unload_model"),
         ):
-            mock_model_cls.from_pretrained.return_value = mock_model
-
             enroll_speaker("Alice", [str(audio_file)], registry_config)
 
         profiles_dir = Path(registry_config["diarization"]["speaker_profiles_dir"])
@@ -76,19 +80,22 @@ class TestEnrollSpeaker:
         mock_inference = MagicMock()
         mock_inference.side_effect = [emb1, emb2]
 
+        mock_pyannote_audio = MagicMock()
+        mock_pyannote_audio.Model.from_pretrained.return_value = MagicMock()
+        mock_pyannote_audio.Inference.return_value = mock_inference
+
         audio1 = tmp_path / "a1.wav"
         audio2 = tmp_path / "a2.wav"
         audio1.touch()
         audio2.touch()
 
         with (
-            patch("pyannote.audio.Model") as mock_model_cls,
-            patch("pyannote.audio.Inference", return_value=mock_inference),
-            patch("torch.cuda.is_available", return_value=False),
+            patch.dict(
+                sys.modules,
+                {"pyannote": MagicMock(), "pyannote.audio": mock_pyannote_audio},
+            ),
             patch("src.gpu_utils.unload_model"),
         ):
-            mock_model_cls.from_pretrained.return_value = MagicMock()
-
             enroll_speaker("Bob", [str(audio1), str(audio2)], registry_config)
 
         profiles_dir = Path(registry_config["diarization"]["speaker_profiles_dir"])
