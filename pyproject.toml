@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transcription-pipeline"
+version = "0.1.0"
+description = "Local GPU-accelerated speech transcription with speaker diarization and LLM post-processing"
+requires-python = ">=3.10"
+authors = [{name = "ASR Pipeline"}]
+
+dependencies = [
+    # Audio processing
+    "torch>=2.0",
+    "torchaudio>=2.0",
+
+    # VAD
+    "silero-vad>=5.0",
+
+    # Speaker diarization
+    "pyannote.audio>=3.1",
+
+    # ASR (vLLM backend is primary)
+    "qwen-asr[vllm]",
+    "vllm>=0.14",
+
+    # LLM inference
+    "llama-cpp-python>=0.3",
+
+    # Utilities
+    "pyyaml",
+    "numpy",
+    "scipy",
+    "huggingface-hub",
+]
+
+[project.optional-dependencies]
+minimal = [
+    "qwen-asr",  # Without vLLM extra
+]
+flash-attn = [
+    "flash-attn>=2.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff>=0.1.0",
+    "pytest-mock",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    ".git",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "C90",    # mccabe
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+combine-as-imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v --tb=short"
+markers = [
+    "integration: integration tests requiring external services",
+    "gpu: tests requiring CUDA GPU",
+]

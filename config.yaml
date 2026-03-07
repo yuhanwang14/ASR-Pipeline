@@ -1,0 +1,50 @@
+# Audio preprocessing
+audio:
+  target_sample_rate: 16000
+  target_channels: 1  # mono
+
+# VAD settings
+vad:
+  model: "silero_vad"
+  min_speech_duration_ms: 250
+  min_silence_duration_ms: 500
+  merge_gap_seconds: 0.5
+
+# Speaker diarization
+diarization:
+  model: "pyannote/speaker-diarization-3.1"
+  embedding_model: "pyannote/wespeaker-voxceleb-resnet34-LM"
+  hf_token: null  # Set via env var HF_TOKEN or ASR_HF_TOKEN
+  num_speakers: null  # null = auto-detect, or set integer
+  speaker_profiles_dir: "speaker_profiles/"
+  match_threshold: 0.75  # Cosine similarity threshold for known speaker matching
+
+# ASR
+asr:
+  model: "Qwen/Qwen3-ASR-1.7B"
+  backend: "vllm"  # "vllm" (recommended) or "transformers" (fallback)
+  dtype: "bfloat16"
+  max_new_tokens: 4096
+  language: null  # null = auto-detect (best for code-switching)
+  max_segment_duration: 300  # seconds, split longer segments
+  gpu_memory_utilization: 0.7  # vLLM memory allocation fraction
+  flash_attention: true
+
+# LLM post-processing
+llm:
+  model_path: null  # Path to GGUF file, or HuggingFace model ID
+  model_id: "Qwen/Qwen3.5-9B"
+  gguf_url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF"
+  backend: "llama-cpp"  # "llama-cpp" or "transformers"
+  n_ctx: 8192
+  n_gpu_layers: -1  # -1 = all layers on GPU
+  tasks:
+    speaker_correction: true
+    text_correction: true
+    summarization: true
+
+# Output
+output:
+  formats: ["json", "srt", "txt"]  # Options: json, srt, rttm, txt
+  output_dir: "output/"
+  save_intermediate: true  # Save results after each stage for crash recovery
