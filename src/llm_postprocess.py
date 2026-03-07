@@ -38,9 +38,7 @@ class LlamaCppBackend:
         import sys
 
         # Ensure CUDA runtime libs from nvidia-* packages are discoverable
-        site_packages = next(
-            (p for p in sys.path if p.endswith("site-packages")), None
-        )
+        site_packages = next((p for p in sys.path if p.endswith("site-packages")), None)
         if site_packages:
             nvidia_libs = os.path.join(site_packages, "nvidia")
             if os.path.isdir(nvidia_libs):
@@ -510,7 +508,10 @@ def _apply_correction_chunked(
     chunks = _chunk_segments(segments, max_segments)
     logger.info(
         "Transcript too long (%d segments, ~%d tokens), splitting into %d chunks of ~%d segments",
-        len(segments), int(estimated_tokens), len(chunks), max_segments,
+        len(segments),
+        int(estimated_tokens),
+        len(chunks),
+        max_segments,
     )
 
     all_corrected = []
@@ -585,7 +586,10 @@ def run_llm_postprocess(
         if tasks.get("speaker_correction", False):
             logger.info("Running LLM task: speaker correction")
             current_segments, warnings = _apply_correction_chunked(
-                current_segments, build_speaker_correction_prompt, backend, n_ctx,
+                current_segments,
+                build_speaker_correction_prompt,
+                backend,
+                n_ctx,
             )
             all_warnings.extend(warnings)
 
@@ -593,7 +597,10 @@ def run_llm_postprocess(
         if tasks.get("text_correction", False):
             logger.info("Running LLM task: text correction")
             current_segments, warnings = _apply_correction_chunked(
-                current_segments, build_text_correction_prompt, backend, n_ctx,
+                current_segments,
+                build_text_correction_prompt,
+                backend,
+                n_ctx,
             )
             all_warnings.extend(warnings)
 
