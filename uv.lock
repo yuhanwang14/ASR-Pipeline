@@ -2824,15 +2824,50 @@ wheels = [
 
 [[package]]
 name = "llama-cpp-python"
-version = "0.3.16"
-source = { registry = "https://pypi.org/simple" }
+version = "0.3.31"
+source = { url = "https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.31-cu128-Basic-linux-20260306/llama_cpp_python-0.3.31+cu128.basic-cp313-cp313-linux_x86_64.whl" }
 dependencies = [
-    { name = "diskcache" },
-    { name = "jinja2" },
-    { name = "numpy" },
-    { name = "typing-extensions" },
+    { name = "diskcache", marker = "python_full_version == '3.13.*'" },
+    { name = "jinja2", marker = "python_full_version == '3.13.*'" },
+    { name = "numpy", marker = "python_full_version == '3.13.*'" },
+    { name = "pillow", marker = "python_full_version == '3.13.*'" },
+    { name = "typing-extensions", marker = "python_full_version == '3.13.*'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/b4/c8cd17629ced0b9644a71d399a91145aedef109c0333443bef015e45b704/llama_cpp_python-0.3.16.tar.gz", hash = "sha256:34ed0f9bd9431af045bb63d9324ae620ad0536653740e9bb163a2e1fcb973be6", size = 50688636, upload-time = "2025-08-15T04:58:29.212Z" }
+wheels = [
+    { url = "https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.31-cu128-Basic-linux-20260306/llama_cpp_python-0.3.31+cu128.basic-cp313-cp313-linux_x86_64.whl", hash = "sha256:039389dbe82dc70fb374edfa39895d8a5c2ed36c0dca53eea6d8797e59bfe6f1" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "black", marker = "extra == 'dev'", specifier = ">=23.3.0" },
+    { name = "diskcache", specifier = ">=5.6.2" },
+    { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.100.0" },
+    { name = "fastapi", marker = "extra == 'test'", specifier = ">=0.100.0" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.24.1" },
+    { name = "httpx", marker = "extra == 'test'", specifier = ">=0.24.1" },
+    { name = "huggingface-hub", marker = "extra == 'test'", specifier = ">=0.23.0" },
+    { name = "jinja2", specifier = ">=2.11.3" },
+    { name = "llama-cpp-python", extras = ["dev", "server", "test"], marker = "extra == 'all'" },
+    { name = "mkdocs", marker = "extra == 'dev'", specifier = ">=1.4.3" },
+    { name = "mkdocs-material", marker = "extra == 'dev'", specifier = ">=9.1.18" },
+    { name = "mkdocstrings", extras = ["python"], marker = "extra == 'dev'", specifier = ">=0.22.0" },
+    { name = "numpy", specifier = ">=1.21.6,<=2.3.2" },
+    { name = "pillow", specifier = ">=9.5.0" },
+    { name = "pydantic-settings", marker = "extra == 'server'", specifier = ">=2.0.1" },
+    { name = "pydantic-settings", marker = "extra == 'test'", specifier = ">=2.0.1" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.4.0" },
+    { name = "pyyaml", marker = "extra == 'server'", specifier = ">=5.1" },
+    { name = "scipy", marker = "extra == 'test'", specifier = ">=1.10" },
+    { name = "sse-starlette", marker = "extra == 'server'", specifier = ">=1.6.1" },
+    { name = "sse-starlette", marker = "extra == 'test'", specifier = ">=1.6.1" },
+    { name = "starlette-context", marker = "extra == 'server'", specifier = ">=0.3.6,<0.4" },
+    { name = "starlette-context", marker = "extra == 'test'", specifier = ">=0.3.6,<0.4" },
+    { name = "twine", marker = "extra == 'dev'", specifier = ">=4.0.2" },
+    { name = "typing-extensions", specifier = ">=4.8.0" },
+    { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.22.0" },
+]
+provides-extras = ["server", "test", "dev", "all"]
 
 [[package]]
 name = "llguidance"
@@ -7045,7 +7080,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },
-    { name = "llama-cpp-python" },
+    { name = "llama-cpp-python", marker = "python_full_version == '3.13.*'" },
     { name = "numpy" },
     { name = "pyannote-audio" },
     { name = "pyyaml" },
@@ -7076,7 +7111,7 @@ minimal = [
 requires-dist = [
     { name = "flash-attn", marker = "extra == 'flash-attn'", specifier = ">=2.0" },
     { name = "huggingface-hub" },
-    { name = "llama-cpp-python", specifier = ">=0.3" },
+    { name = "llama-cpp-python", url = "https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.31-cu128-Basic-linux-20260306/llama_cpp_python-0.3.31+cu128.basic-cp313-cp313-linux_x86_64.whl" },
     { name = "numpy" },
     { name = "pyannote-audio", specifier = ">=3.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },

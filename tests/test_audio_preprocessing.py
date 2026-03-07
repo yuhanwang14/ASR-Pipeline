@@ -1,11 +1,12 @@
 """Tests for audio preprocessing."""
 
 import pytest
+import soundfile as sf
 import torch
 
 from src.audio_preprocessing import load_audio, save_temp_wav, slice_waveform
 
-# Mark audio loading tests as integration since they require ffmpeg
+# Mark audio loading tests as integration since they require soundfile
 pytestmark = pytest.mark.integration
 
 
@@ -26,9 +27,7 @@ class TestLoadAudio:
         waveform = torch.sin(2 * 3.14159 * 440 * torch.arange(sample_rate) / sample_rate)
         waveform = waveform.unsqueeze(0)  # (1, N)
 
-        import torchaudio
-
-        torchaudio.save(str(audio_file), waveform, sample_rate)
+        sf.write(str(audio_file), waveform.numpy().T, sample_rate)
 
         # Load and verify
         loaded, sr = load_audio(audio_file)
@@ -45,9 +44,7 @@ class TestLoadAudio:
         sample_rate = 16000
         waveform = torch.randn(2, sample_rate)  # 2 channels, 1 second
 
-        import torchaudio
-
-        torchaudio.save(str(audio_file), waveform, sample_rate)
+        sf.write(str(audio_file), waveform.numpy().T, sample_rate)
 
         # Load and verify mono conversion
         loaded, sr = load_audio(audio_file)
@@ -62,9 +59,7 @@ class TestLoadAudio:
         sample_rate = 44100
         waveform = torch.randn(1, sample_rate)
 
-        import torchaudio
-
-        torchaudio.save(str(audio_file), waveform, sample_rate)
+        sf.write(str(audio_file), waveform.numpy().T, sample_rate)
 
         # Load and verify resampling
         loaded, sr = load_audio(audio_file)
@@ -80,9 +75,7 @@ class TestLoadAudio:
         sample_rate = 16000
         waveform = torch.randn(1, sample_rate) * 10.0  # Large amplitude
 
-        import torchaudio
-
-        torchaudio.save(str(audio_file), waveform, sample_rate)
+        sf.write(str(audio_file), waveform.numpy().T, sample_rate)
 
         # Load and verify normalization
         loaded, sr = load_audio(audio_file)
@@ -138,11 +131,9 @@ class TestSaveTempWav:
             assert temp_path.suffix == ".wav"
 
             # Load and verify
-            import torchaudio
-
-            loaded, sr = torchaudio.load(str(temp_path))
+            data, sr = sf.read(str(temp_path), dtype="float32")
             assert sr == 16000
-            assert loaded.shape[0] == 1
+            assert data.ndim == 1 or data.shape[1] == 1  # Mono
         finally:
             # Cleanup
             if temp_path.exists():
@@ -156,9 +147,7 @@ class TestSaveTempWav:
 
             try:
                 assert temp_path.exists()
-                import torchaudio
-
-                loaded, loaded_sr = torchaudio.load(str(temp_path))
+                data, loaded_sr = sf.read(str(temp_path), dtype="float32")
                 assert loaded_sr == sr
             finally:
                 if temp_path.exists():

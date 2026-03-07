@@ -24,8 +24,8 @@ dependencies = [
     "qwen-asr[vllm]",
     "vllm>=0.14",
 
-    # LLM inference
-    "llama-cpp-python>=0.3",
+    # LLM inference (JamePeng fork for Qwen3.5 hybrid architecture support)
+    "llama-cpp-python>=0.3.31",
 
     # Utilities
     "pyyaml",
@@ -47,6 +47,9 @@ dev = [
     "ruff>=0.1.0",
     "pytest-mock",
 ]
+
+[tool.uv.sources]
+llama-cpp-python = { url = "https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.31-cu128-Basic-linux-20260306/llama_cpp_python-0.3.31+cu128.basic-cp313-cp313-linux_x86_64.whl" }
 
 [tool.ruff]
 line-length = 100

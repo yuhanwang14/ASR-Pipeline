@@ -34,6 +34,27 @@ class LlamaCppBackend:
 
     def load(self) -> None:
         """Load GGUF model via llama-cpp-python."""
+        import os
+        import sys
+
+        # Ensure CUDA runtime libs from nvidia-* packages are discoverable
+        site_packages = next(
+            (p for p in sys.path if p.endswith("site-packages")), None
+        )
+        if site_packages:
+            nvidia_libs = os.path.join(site_packages, "nvidia")
+            if os.path.isdir(nvidia_libs):
+                lib_dirs = [
+                    os.path.join(nvidia_libs, d, "lib")
+                    for d in os.listdir(nvidia_libs)
+                    if os.path.isdir(os.path.join(nvidia_libs, d, "lib"))
+                ]
+                ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+                for d in lib_dirs:
+                    if d not in ld_path:
+                        ld_path = d + ":" + ld_path
+                os.environ["LD_LIBRARY_PATH"] = ld_path
+
         from llama_cpp import Llama  # Lazy import
 
         model_path = self.config["llm"]["model_path"]
@@ -67,12 +88,20 @@ class LlamaCppBackend:
 
     def unload(self) -> None:
         """Unload model and free GPU memory."""
-        from src.gpu_utils import unload_model  # Lazy import
+        import gc
 
         if self.llm is not None:
-            llm_ref = self.llm
+            del self.llm
             self.llm = None
-            unload_model(llm_ref)
+            gc.collect()
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except ImportError:
+                pass
             logger.info("LlamaCpp model unloaded.")
 
 
@@ -123,17 +152,22 @@ class TransformersLLMBackend:
 
     def unload(self) -> None:
         """Unload model and free GPU memory."""
-        from src.gpu_utils import unload_model  # Lazy import
+        import gc
 
-        refs = []
-        if self.model is not None:
-            refs.append(self.model)
+        if self.model is not None or self.tokenizer is not None:
+            del self.model
+            del self.tokenizer
             self.model = None
-        if self.tokenizer is not None:
-            refs.append(self.tokenizer)
             self.tokenizer = None
-        if refs:
-            unload_model(*refs)
+            gc.collect()
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except ImportError:
+                pass
             logger.info("Transformers LLM model unloaded.")
 
 
@@ -412,6 +446,89 @@ def tpst_check(original: list[dict], corrected: list[dict]) -> tuple[list[dict],
 
 
 # ---------------------------------------------------------------------------
+# Chunking for long transcripts
+# ---------------------------------------------------------------------------
+
+
+def _chunk_segments(segments: list[dict], max_segments_per_chunk: int) -> list[list[dict]]:
+    """Split segments into chunks that fit within context window.
+
+    Args:
+        segments: All transcript segments.
+        max_segments_per_chunk: Max segments per chunk.
+
+    Returns:
+        List of segment chunks.
+    """
+    if not segments:
+        return []
+    chunks = []
+    for i in range(0, len(segments), max_segments_per_chunk):
+        chunks.append(segments[i : i + max_segments_per_chunk])
+    return chunks
+
+
+def _apply_correction_chunked(
+    segments: list[dict],
+    prompt_builder,
+    backend,
+    n_ctx: int,
+) -> tuple[list[dict], list[str]]:
+    """Apply LLM correction in chunks that fit the context window.
+
+    Estimates tokens per segment, splits into chunks, processes each,
+    and reassembles.
+
+    Args:
+        segments: All transcript segments.
+        prompt_builder: Function that builds prompt from formatted text.
+        backend: LLM backend with .generate() method.
+        n_ctx: Context window size in tokens.
+
+    Returns:
+        (corrected_segments, warnings)
+    """
+    # Estimate: prompt template ~200 tokens, each segment ~avg chars/3 tokens
+    # Reserve half the context for output (LLM reproduces the transcript)
+    available_tokens = n_ctx // 2 - 200
+    # Rough estimate: 1 token per 3 chars for mixed CJK/English
+    total_chars = sum(len(s.get("text", "")) + 30 for s in segments)  # +30 for speaker tag
+    chars_per_token = 3
+    estimated_tokens = total_chars / chars_per_token
+
+    if estimated_tokens <= available_tokens:
+        # Fits in one shot
+        formatted = format_diarization_lm(segments)
+        prompt = prompt_builder(formatted)
+        raw_output = backend.generate(prompt)
+        corrected = parse_diarization_lm(raw_output)
+        return tpst_check(segments, corrected)
+
+    # Need to chunk
+    tokens_per_segment = estimated_tokens / len(segments)
+    max_segments = max(1, int(available_tokens / tokens_per_segment))
+    chunks = _chunk_segments(segments, max_segments)
+    logger.info(
+        "Transcript too long (%d segments, ~%d tokens), splitting into %d chunks of ~%d segments",
+        len(segments), int(estimated_tokens), len(chunks), max_segments,
+    )
+
+    all_corrected = []
+    all_warnings = []
+    for i, chunk in enumerate(chunks):
+        logger.info("Processing chunk %d/%d (%d segments)", i + 1, len(chunks), len(chunk))
+        formatted = format_diarization_lm(chunk)
+        prompt = prompt_builder(formatted)
+        raw_output = backend.generate(prompt)
+        corrected = parse_diarization_lm(raw_output)
+        safe_segments, warnings = tpst_check(chunk, corrected)
+        all_corrected.extend(safe_segments)
+        all_warnings.extend(warnings)
+
+    return all_corrected, all_warnings
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -458,6 +575,8 @@ def run_llm_postprocess(
         else:
             raise ValueError(f"Unknown LLM backend: {backend_name}")
 
+    n_ctx = config.get("llm", {}).get("n_ctx", 8192)
+
     # 2. Load
     backend.load()
 
@@ -465,24 +584,20 @@ def run_llm_postprocess(
         # 3. Task 1: Speaker correction
         if tasks.get("speaker_correction", False):
             logger.info("Running LLM task: speaker correction")
-            formatted = format_diarization_lm(current_segments)
-            prompt = build_speaker_correction_prompt(formatted)
-            raw_output = backend.generate(prompt)
-            corrected = parse_diarization_lm(raw_output)
-            current_segments, warnings = tpst_check(current_segments, corrected)
+            current_segments, warnings = _apply_correction_chunked(
+                current_segments, build_speaker_correction_prompt, backend, n_ctx,
+            )
             all_warnings.extend(warnings)
 
         # 4. Task 2: Text correction
         if tasks.get("text_correction", False):
             logger.info("Running LLM task: text correction")
-            formatted = format_diarization_lm(current_segments)
-            prompt = build_text_correction_prompt(formatted)
-            raw_output = backend.generate(prompt)
-            corrected = parse_diarization_lm(raw_output)
-            current_segments, warnings = tpst_check(current_segments, corrected)
+            current_segments, warnings = _apply_correction_chunked(
+                current_segments, build_text_correction_prompt, backend, n_ctx,
+            )
             all_warnings.extend(warnings)
 
-        # 5. Task 3: Summary
+        # 5. Task 3: Summary (uses full transcript — truncate if needed)
         if tasks.get("summarization", False):
             logger.info("Running LLM task: summarization")
             formatted = format_diarization_lm(current_segments)

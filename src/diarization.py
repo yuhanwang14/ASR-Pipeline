@@ -38,7 +38,7 @@ class PyAnnoteBackend:
         logger.info("Loading pyannote diarization pipeline: %s", self._model_name)
         self._pipeline = Pipeline.from_pretrained(
             self._model_name,
-            use_auth_token=self._hf_token,
+            token=self._hf_token,
         )
         if torch.cuda.is_available():
             self._pipeline.to(torch.device("cuda"))
@@ -62,10 +62,13 @@ class PyAnnoteBackend:
         if self._num_speakers is not None:
             kwargs["num_speakers"] = self._num_speakers
 
-        diarization = self._pipeline(audio_input, **kwargs)
+        result = self._pipeline(audio_input, **kwargs)
+
+        # pyannote >= 3.3 returns DiarizeOutput dataclass; extract Annotation
+        annotation = getattr(result, "speaker_diarization", result)
 
         segments = []
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
+        for turn, _, speaker in annotation.itertracks(yield_label=True):
             segments.append(
                 {
                     "start": turn.start,
@@ -79,12 +82,18 @@ class PyAnnoteBackend:
 
     def unload(self) -> None:
         """Unload model and free GPU memory."""
-        from src.gpu_utils import unload_model
+        import gc
+
+        import torch
 
         if self._pipeline is not None:
             logger.info("Unloading pyannote diarization pipeline")
-            unload_model(self._pipeline)
+            del self._pipeline
             self._pipeline = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
 
 
 def run_diarization(

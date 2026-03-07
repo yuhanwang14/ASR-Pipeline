@@ -9,7 +9,7 @@ def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
     """
     Load audio from file, convert to 16kHz mono, normalize to [-1, 1].
 
-    Supports any format supported by torchaudio.load (WAV, FLAC, MP3, OGG, Opus).
+    Supports WAV, FLAC, OGG, and other formats via soundfile.
 
     Args:
         path: Path to audio file
@@ -21,14 +21,19 @@ def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
         FileNotFoundError: If file not found
         RuntimeError: If audio loading fails
     """
-    import torchaudio  # Lazy import
+    import soundfile as sf  # Lazy import
 
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Audio file not found: {path}")
 
-    # Load audio
-    waveform, sample_rate = torchaudio.load(str(path))
+    # Load audio via soundfile (avoids torchaudio TorchCodec/FFmpeg issues)
+    data, sample_rate = sf.read(str(path), dtype="float32")
+    # data shape: (N,) for mono, (N, channels) for multi-channel
+    if data.ndim == 1:
+        waveform = torch.from_numpy(data).unsqueeze(0)  # (1, N)
+    else:
+        waveform = torch.from_numpy(data).T  # (channels, N)
 
     # Convert to mono by averaging channels if needed
     if waveform.shape[0] > 1:
@@ -38,6 +43,8 @@ def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
 
     # Resample to 16kHz if needed
     if sample_rate != 16000:
+        import torchaudio  # Lazy import — only needed for resampling
+
         resample = torchaudio.transforms.Resample(sample_rate, 16000)
         waveform = resample(waveform)
         sample_rate = 16000
@@ -83,10 +90,11 @@ def save_temp_wav(waveform: torch.Tensor, sample_rate: int) -> Path:
     """
     import tempfile
 
-    import torchaudio  # Lazy import
+    import soundfile as sf  # Lazy import
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         temp_path = Path(f.name)
 
-    torchaudio.save(str(temp_path), waveform, sample_rate)
+    # soundfile expects (N, channels) — transpose from (channels, N)
+    sf.write(str(temp_path), waveform.numpy().T, sample_rate)
     return temp_path
