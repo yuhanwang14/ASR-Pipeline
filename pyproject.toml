@@ -46,6 +46,7 @@ dev = [
     "pytest-cov",
     "ruff>=0.1.0",
     "pytest-mock",
+    "jiwer>=3.0",
 ]
 
 [tool.uv.sources]

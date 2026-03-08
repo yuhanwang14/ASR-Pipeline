@@ -17,11 +17,6 @@ def main():
         help="Number of speakers (auto-detect if not set)",
     )
     parser.add_argument(
-        "--no-summary",
-        action="store_true",
-        help="Disable summary generation",
-    )
-    parser.add_argument(
         "--resume",
         action="store_true",
         help="Resume from last completed stage",
@@ -50,8 +45,6 @@ def main():
         # Apply CLI overrides
         if args.num_speakers is not None:
             config["diarization"]["num_speakers"] = args.num_speakers
-        if args.no_summary:
-            config["llm"]["tasks"]["summarization"] = False
         if args.formats:
             config["output"]["formats"] = args.formats
         if args.output_dir:

@@ -40,7 +40,7 @@ def run_pipeline(
     2. Stage 0: VAD (silence removal) → clean waveform + timestamp map
     3. Stage 1: Diarization on clean waveform → remap to original time
     4. Stage 2: ASR on original waveform using remapped segments
-    5. Stage 3: LLM post-processing (error correction, summarization)
+    5. Stage 3: LLM post-processing (speaker and text correction)
     6. Format and save output
 
     Args:
@@ -167,9 +167,8 @@ def run_pipeline(
 
         pipeline_result["stages"]["llm_postprocess"] = stage_3_result
 
-        # Expose final segments and summary at top level for output formatters
+        # Expose final segments at top level for output formatters
         pipeline_result["segments"] = stage_3_result.get("segments", [])
-        pipeline_result["summary"] = stage_3_result.get("summary")
         pipeline_result["warnings"] = stage_3_result.get("warnings", [])
         pipeline_result["timings"] = timings
         pipeline_result["total_time_seconds"] = sum(timings.values())

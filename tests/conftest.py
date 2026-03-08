@@ -55,7 +55,6 @@ def sample_config() -> dict:
             "tasks": {
                 "speaker_correction": True,
                 "text_correction": True,
-                "summarization": True,
             },
         },
         "output": {

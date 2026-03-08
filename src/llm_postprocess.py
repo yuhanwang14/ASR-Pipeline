@@ -1,4 +1,4 @@
-"""LLM post-processing: speaker correction, text correction, summarization.
+"""LLM post-processing: speaker correction, text correction.
 
 Uses DiarizationLM-inspired prompting with TPST safety checks to prevent
 the LLM from hallucinating or altering transcribed words.
@@ -21,7 +21,7 @@ class LLMBackend(Protocol):
     """Protocol for LLM inference backends."""
 
     def load(self) -> None: ...
-    def generate(self, prompt: str) -> str: ...
+    def generate(self, prompt: str, max_tokens: int | None = None) -> str: ...
     def unload(self) -> None: ...
 
 
@@ -31,6 +31,7 @@ class LlamaCppBackend:
     def __init__(self, config: dict) -> None:
         self.config = config
         self.llm = None
+        self.n_ctx = config.get("llm", {}).get("n_ctx", 8192)
 
     def load(self) -> None:
         """Load GGUF model via llama-cpp-python."""
@@ -75,13 +76,31 @@ class LlamaCppBackend:
             model_path=str(model_path),
             n_gpu_layers=n_gpu_layers,
             n_ctx=n_ctx,
+            flash_attn=True,
+            type_k=8,  # Q8_0 KV cache keys
+            type_v=8,  # Q8_0 KV cache values
         )
 
-    def generate(self, prompt: str) -> str:
-        """Generate text from prompt."""
+    def generate(self, prompt: str, max_tokens: int | None = None) -> str:
+        """Generate text from prompt.
+
+        Args:
+            prompt: The input prompt string.
+            max_tokens: Maximum number of tokens to generate. Defaults to
+                n_ctx // 2 if not specified.
+        """
         if self.llm is None:
             raise RuntimeError("Model not loaded. Call load() first.")
-        result = self.llm(prompt, max_tokens=2048)
+        if max_tokens is None:
+            max_tokens = self.n_ctx // 2
+        result = self.llm(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            present_penalty=1.5,
+        )
         return result["choices"][0]["text"]
 
     def unload(self) -> None:
@@ -110,6 +129,7 @@ class TransformersLLMBackend:
         self.config = config
         self.model = None
         self.tokenizer = None
+        self.n_ctx = config.get("llm", {}).get("n_ctx", 8192)
 
     def load(self) -> None:
         """Load model with 4-bit quantization via bitsandbytes."""
@@ -130,19 +150,31 @@ class TransformersLLMBackend:
         )
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    def generate(self, prompt: str) -> str:
-        """Tokenize, generate, and decode."""
+    def generate(self, prompt: str, max_tokens: int | None = None) -> str:
+        """Tokenize, generate, and decode.
+
+        Args:
+            prompt: The input prompt string.
+            max_tokens: Maximum number of new tokens to generate. Defaults to
+                n_ctx // 2 if not specified.
+        """
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("Model not loaded. Call load() first.")
 
         import torch  # Lazy import
 
+        if max_tokens is None:
+            max_tokens = self.n_ctx // 2
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=2048,
-                do_sample=False,
+                max_new_tokens=max_tokens,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.8,
+                top_k=20,
+                repetition_penalty=1.5,
             )
         # Decode only the newly generated tokens
         generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
@@ -174,29 +206,193 @@ class TransformersLLMBackend:
 # ---------------------------------------------------------------------------
 
 _SPEAKER_TAG_RE = re.compile(r"<speaker:(\w+)>")
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+_THINK_UNCLOSED_RE = re.compile(r"<think>.*", re.DOTALL)
 
 
-def format_diarization_lm(segments: list[dict]) -> str:
+def _strip_think_tags(text: str) -> str:
+    """Strip Qwen3.5 ``<think>...</think>`` reasoning blocks from output.
+
+    Handles both closed ``<think>...</think>`` blocks and unclosed ``<think>``
+    blocks (when the model runs out of tokens during reasoning).
+    """
+    text = _THINK_RE.sub("", text)
+    text = _THINK_UNCLOSED_RE.sub("", text)
+    return text.strip()
+
+
+def parse_json_corrections(raw: str) -> list[dict]:
+    """Parse a JSON array of corrections from LLM output.
+
+    Tolerates preamble text before the JSON array and trailing text after it.
+    Returns an empty list on parse failure.
+    """
+    import json
+
+    raw = raw.strip()
+    if not raw:
+        return []
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        if raw == "[]":
+            return []
+        logger.warning("No JSON array found in LLM output: %.200s", raw)
+        return []
+    try:
+        result = json.loads(raw[start : end + 1])
+        if not isinstance(result, list):
+            logger.warning("JSON output is not an array")
+            return []
+        return result
+    except json.JSONDecodeError as e:
+        logger.warning("Failed to parse JSON corrections: %s", e)
+        return []
+
+
+def validate_text_correction(segment_text: str, correction: dict) -> tuple[bool, str]:
+    """Validate a single text correction against its source segment.
+
+    Returns:
+        ``(is_valid, reason)`` — True if safe to apply, else False with reason.
+    """
+    original = correction.get("original", "")
+    corrected = correction.get("corrected", "")
+    if not original or not corrected:
+        return False, "Empty original or corrected text"
+    if original == corrected:
+        return False, "Original and corrected are identical"
+    if original not in segment_text:
+        return False, f"'{original}' not found in segment"
+    if len(corrected) > 3 * len(original) + 10:
+        return False, "Correction suspiciously long"
+    return True, ""
+
+
+_MAX_CORRECTIONS_PER_CHUNK = 20
+
+
+def apply_speaker_corrections(
+    segments: list[dict],
+    corrections: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Apply JSON speaker corrections to segments.
+
+    Each correction must specify the expected old_speaker to prevent
+    misapplication if the LLM output is stale or misaligned.
+
+    Args:
+        segments: Original transcript segments.
+        corrections: List of ``{"line", "old_speaker", "new_speaker"}`` dicts.
+
+    Returns:
+        ``(corrected_segments, warnings)``
+    """
+    warnings: list[str] = []
+    result = [dict(s) for s in segments]
+    applied = 0
+    for corr in corrections:
+        line = corr.get("line")
+        if not isinstance(line, int) or line < 0 or line >= len(result):
+            warnings.append(f"Invalid line {line!r}, skipping speaker correction")
+            continue
+        old_speaker = corr.get("old_speaker", "")
+        new_speaker = corr.get("new_speaker", "")
+        if not old_speaker or not new_speaker:
+            warnings.append(f"Line {line}: missing speaker field, skipping")
+            continue
+        if result[line]["speaker"] != old_speaker:
+            warnings.append(
+                f"Line {line}: expected speaker '{old_speaker}', "
+                f"got '{result[line]['speaker']}', skipping"
+            )
+            continue
+        result[line]["speaker"] = new_speaker
+        applied += 1
+    if applied:
+        logger.info("Applied %d speaker correction(s)", applied)
+    return result, warnings
+
+
+def apply_text_corrections(
+    segments: list[dict],
+    corrections: list[dict],
+    *,
+    max_corrections: int = _MAX_CORRECTIONS_PER_CHUNK,
+) -> tuple[list[dict], list[str]]:
+    """Apply JSON text corrections to segments with per-patch validation.
+
+    Each correction is validated individually. Invalid corrections are skipped
+    with a warning. If total corrections exceed *max_corrections*, all are
+    rejected as likely hallucination.
+
+    Args:
+        segments: Original transcript segments.
+        corrections: List of ``{"line", "original", "corrected"}`` dicts.
+        max_corrections: Hallucination guard — reject all if exceeded.
+
+    Returns:
+        ``(corrected_segments, warnings)``
+    """
+    warnings: list[str] = []
+    if len(corrections) > max_corrections:
+        warnings.append(
+            f"Too many corrections ({len(corrections)} > {max_corrections}), "
+            "likely hallucination — skipping all"
+        )
+        return segments, warnings
+
+    result = [dict(s) for s in segments]
+    applied = 0
+    for corr in corrections:
+        line = corr.get("line")
+        if not isinstance(line, int) or line < 0 or line >= len(result):
+            warnings.append(f"Invalid line {line!r}, skipping correction")
+            continue
+        valid, reason = validate_text_correction(result[line]["text"], corr)
+        if not valid:
+            warnings.append(f"Line {line}: {reason}, skipping")
+            continue
+        result[line]["text"] = result[line]["text"].replace(corr["original"], corr["corrected"], 1)
+        applied += 1
+    if applied:
+        logger.info("Applied %d text correction(s)", applied)
+    return result, warnings
+
+
+def format_diarization_lm(segments: list[dict], *, numbered: bool = False) -> str:
     """Format segments as DiarizationLM text format.
 
     Each segment becomes a line: ``<speaker:LABEL> text``
 
+    When *numbered* is True, each line is prefixed with ``[N]`` so the LLM
+    can reference segments by their explicit index rather than counting lines.
+
     Args:
         segments: List of dicts with ``speaker`` and ``text`` keys.
+        numbered: If True, prefix each line with ``[N]``.
 
     Returns:
         Multi-line string in DiarizationLM format.
 
-    Example output::
+    Example output (numbered=False)::
 
         <speaker:SPEAKER_00> Hello world
         <speaker:SPEAKER_01> Hi there
+
+    Example output (numbered=True)::
+
+        [0] <speaker:SPEAKER_00> Hello world
+        [1] <speaker:SPEAKER_01> Hi there
     """
     lines: list[str] = []
-    for seg in segments:
+    for i, seg in enumerate(segments):
         speaker = seg.get("speaker", "UNKNOWN")
         text = seg.get("text", "")
-        lines.append(f"<speaker:{speaker}> {text}")
+        if numbered:
+            lines.append(f"[{i}] <speaker:{speaker}> {text}")
+        else:
+            lines.append(f"<speaker:{speaker}> {text}")
     return "\n".join(lines)
 
 
@@ -229,88 +425,90 @@ def parse_diarization_lm(text: str) -> list[dict]:
 
 
 def build_speaker_correction_prompt(transcript: str) -> str:
-    """Build prompt for speaker label correction task.
+    """Build prompt for speaker label correction with JSON output.
 
-    Instructs the LLM to only change ``<speaker:XX>`` tags and never touch the
-    transcribed words.  Template follows the DiarizationLM approach.
+    Instructs the LLM to output a JSON array of speaker label corrections
+    instead of reproducing the entire transcript.
 
     Args:
         transcript: Transcript in DiarizationLM text format.
 
     Returns:
-        Full prompt string ready for LLM generation.
+        Full ChatML prompt string ready for LLM generation.
     """
     return (
-        "You are a transcript editor. Below is a speaker-diarized transcript that may have "
-        "speaker attribution errors. Based on conversational context and semantic coherence, "
-        "correct the speaker labels ONLY. Do NOT modify any words in the transcript.\n"
+        "<|im_start|>system\n"
+        "You fix speaker labels in diarized transcripts.\n"
+        "Output ONLY a JSON array of corrections. If no corrections needed, output [].\n"
+        "Each correction: "
+        '{"line": N, "old_speaker": "SPEAKER_XX", "new_speaker": "SPEAKER_YY"}\n'
+        "where N is the number shown in [brackets] at the start of each line.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n"
+        "Example input:\n"
+        "[0] <speaker:SPEAKER_00> 你好，我是小明。\n"
+        "[1] <speaker:SPEAKER_00> 你好小明，我叫小红。\n"
+        "[2] <speaker:SPEAKER_00> 小红你好，今天讨论什么？\n"
         "\n"
-        "Rules:\n"
-        "1. Only change <speaker:XX> tags\n"
-        "2. Never add, remove, or modify any spoken words\n"
-        "3. Use conversational flow to determine correct speaker assignments\n"
-        "4. If unsure, keep the original label\n"
+        "Example output:\n"
+        '[{"line": 1, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}]\n'
         "\n"
-        "Transcript:\n"
+        "Now correct speaker labels in this transcript. "
+        "Only change labels where speaker attribution is clearly wrong "
+        "based on conversational context. If unsure, keep the original label. "
+        "If no corrections needed, output [].\n"
+        "\n"
         f"{transcript}\n"
-        "\n"
-        "Output the corrected transcript in the same format:\n"
+        "<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n</think>\n"
     )
 
 
 def build_text_correction_prompt(transcript: str) -> str:
-    """Build prompt for text error correction task.
+    """Build prompt for text error correction with JSON output.
 
-    Instructs the LLM to fix ASR errors, homophones, and punctuation while
-    preserving code-switching style. Speaker labels must remain untouched.
+    Instructs the LLM to output a JSON array of corrections instead of
+    reproducing the entire transcript. Each correction identifies the line,
+    the original text, and the corrected text.
 
     Args:
         transcript: Transcript in DiarizationLM text format.
 
     Returns:
-        Full prompt string ready for LLM generation.
+        Full ChatML prompt string ready for LLM generation.
     """
     return (
-        "You are a transcript proofreader for Chinese-English code-switched speech. "
-        "Fix obvious ASR errors (homophones, misheard words) while preserving the "
-        "original meaning. Fix punctuation. Do NOT change speaker labels.\n"
+        "<|im_start|>system\n"
+        "You fix ASR errors in Chinese-English code-switched transcripts.\n"
+        "Output ONLY a JSON array of corrections. If no errors, output [].\n"
+        "Each correction: "
+        '{"line": N, "original": "wrong text", "corrected": "fixed text"}\n'
+        "where N is the number shown in [brackets] at the start of each line.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n"
+        "Common ASR error patterns:\n"
+        "- English words misheard as Chinese: sync→想/think, demo→带我, VC→飞机\n"
+        "- Acronyms garbled: SDK→SCK, PEVC→P2V, SOTA→saota\n"
+        "- English phrases heard as Chinese: fund raising→Fun Reason, moat→Mot\n"
+        "- Chinese homophones: 拒→剧\n"
         "\n"
-        "Rules:\n"
-        "1. Fix clear errors only — do not rephrase or paraphrase\n"
-        "2. Preserve code-switching style (don't translate Chinese to English or vice versa)\n"
-        "3. Fix punctuation and sentence boundaries\n"
-        "4. Keep all speaker labels unchanged\n"
+        "Example input:\n"
+        "[0] <speaker:SPEAKER_00> 今天简单think一下项目进度。\n"
+        "[1] <speaker:SPEAKER_01> 好的，我觉得这个飞机给的feedback还行。\n"
         "\n"
-        "Transcript:\n"
+        "Example output:\n"
+        '[{"line": 0, "original": "think", "corrected": "sync"}, '
+        '{"line": 1, "original": "飞机", "corrected": "VC"}]\n'
+        "\n"
+        "Now fix ASR errors in this transcript. "
+        "Only fix clear misrecognitions — do not rephrase, summarize, or merge lines. "
+        "If no errors, output [].\n"
+        "\n"
         f"{transcript}\n"
-        "\n"
-        "Output the corrected transcript:\n"
-    )
-
-
-def build_summary_prompt(transcript: str) -> str:
-    """Build prompt for summary generation.
-
-    Asks for key points, decisions, and action items in the same language mix
-    as the original transcript.
-
-    Args:
-        transcript: Transcript in DiarizationLM text format (or plain text).
-
-    Returns:
-        Full prompt string ready for LLM generation.
-    """
-    return (
-        "Summarize the following meeting transcript. Include:\n"
-        "1. Key discussion points\n"
-        "2. Decisions made\n"
-        "3. Action items with assigned speakers\n"
-        "Output in the same language mix as the original transcript.\n"
-        "\n"
-        "Transcript:\n"
-        f"{transcript}\n"
-        "\n"
-        "Summary:\n"
+        "<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n</think>\n"
     )
 
 
@@ -448,22 +646,63 @@ def tpst_check(original: list[dict], corrected: list[dict]) -> tuple[list[dict],
 # ---------------------------------------------------------------------------
 
 
-def _chunk_segments(segments: list[dict], max_segments_per_chunk: int) -> list[list[dict]]:
-    """Split segments into chunks that fit within context window.
+def _chunk_segments(
+    segments: list[dict],
+    max_segments_per_chunk: int,
+) -> list[list[dict]]:
+    """Split segments into chunks, preferring speaker-turn boundaries.
+
+    Avoids splitting in the middle of a speaker turn (consecutive segments
+    with the same speaker).
 
     Args:
         segments: All transcript segments.
-        max_segments_per_chunk: Max segments per chunk.
+        max_segments_per_chunk: Target max segments per chunk.
 
     Returns:
-        List of segment chunks.
+        List of segment chunks. All original segments appear exactly once.
     """
     if not segments:
         return []
-    chunks = []
-    for i in range(0, len(segments), max_segments_per_chunk):
-        chunks.append(segments[i : i + max_segments_per_chunk])
+    if len(segments) <= max_segments_per_chunk:
+        return [segments]
+
+    # Find speaker-turn boundary indices
+    boundaries: list[int] = [0]
+    for i in range(1, len(segments)):
+        if segments[i].get("speaker") != segments[i - 1].get("speaker"):
+            boundaries.append(i)
+
+    chunks: list[list[dict]] = []
+    chunk_start = 0
+    while chunk_start < len(segments):
+        chunk_end = min(chunk_start + max_segments_per_chunk, len(segments))
+        if chunk_end < len(segments):
+            # Find nearest speaker-turn boundary at or before chunk_end
+            best = chunk_start + 1  # minimum 1 segment
+            for b in boundaries:
+                if chunk_start < b <= chunk_end:
+                    best = b
+            chunk_end = best
+        chunks.append(segments[chunk_start:chunk_end])
+        chunk_start = chunk_end
     return chunks
+
+
+def _process_json_speaker_output(
+    original_chunk: list[dict], raw_output: str
+) -> tuple[list[dict], list[str]]:
+    """Process JSON speaker corrections output."""
+    corrections = parse_json_corrections(raw_output)
+    return apply_speaker_corrections(original_chunk, corrections)
+
+
+def _process_json_text_output(
+    original_chunk: list[dict], raw_output: str
+) -> tuple[list[dict], list[str]]:
+    """Process JSON text corrections output."""
+    corrections = parse_json_corrections(raw_output)
+    return apply_text_corrections(original_chunk, corrections)
 
 
 def _apply_correction_chunked(
@@ -471,6 +710,9 @@ def _apply_correction_chunked(
     prompt_builder,
     backend,
     n_ctx: int,
+    *,
+    output_processor,
+    max_output_tokens: int | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Apply LLM correction in chunks that fit the context window.
 
@@ -482,34 +724,47 @@ def _apply_correction_chunked(
         prompt_builder: Function that builds prompt from formatted text.
         backend: LLM backend with .generate() method.
         n_ctx: Context window size in tokens.
+        output_processor: Callback ``(original_chunk, raw_output) -> (segments, warnings)``
+            that parses and validates the LLM output for a single chunk.
+        max_output_tokens: If set, pass to ``backend.generate()`` and use as
+            the output budget for chunk sizing.
 
     Returns:
         (corrected_segments, warnings)
     """
-    # Estimate: prompt template ~200 tokens, each segment ~avg chars/3 tokens
-    # Reserve half the context for output (LLM reproduces the transcript)
-    available_tokens = n_ctx // 2 - 200
-    # Rough estimate: 1 token per 3 chars for mixed CJK/English
-    total_chars = sum(len(s.get("text", "")) + 30 for s in segments)  # +30 for speaker tag
-    chars_per_token = 3
-    estimated_tokens = total_chars / chars_per_token
+    # Build a trial prompt to measure actual size, then estimate tokens.
+    # CJK-heavy text tokenizes at ~2 chars/token in Qwen; mixed text ~2.5.
+    # We use 2 as a conservative estimate to avoid under-chunking.
+    chars_per_token = 2
+    formatted = format_diarization_lm(segments, numbered=True)
+    trial_prompt = prompt_builder(formatted)
+    estimated_total_input = len(trial_prompt) / chars_per_token
+    estimated_transcript_tokens = len(formatted) / chars_per_token
+    output_budget = max_output_tokens if max_output_tokens else n_ctx // 2
 
-    if estimated_tokens <= available_tokens:
+    def _process_chunk(original_chunk):
+        """Generate, parse, validate, and merge metadata for one chunk."""
+        fmt = format_diarization_lm(original_chunk, numbered=True)
+        prompt = prompt_builder(fmt)
+        raw_output = _strip_think_tags(backend.generate(prompt, max_tokens=max_output_tokens))
+        return output_processor(original_chunk, raw_output)
+
+    if estimated_total_input + output_budget <= n_ctx:
         # Fits in one shot
-        formatted = format_diarization_lm(segments)
-        prompt = prompt_builder(formatted)
-        raw_output = backend.generate(prompt)
-        corrected = parse_diarization_lm(raw_output)
-        return tpst_check(segments, corrected)
+        return _process_chunk(segments)
 
     # Need to chunk
-    tokens_per_segment = estimated_tokens / len(segments)
-    max_segments = max(1, int(available_tokens / tokens_per_segment))
+    overhead_tokens = estimated_total_input - estimated_transcript_tokens
+    available_for_transcript = n_ctx - overhead_tokens - output_budget
+    tokens_per_segment = max(1, estimated_transcript_tokens / max(1, len(segments)))
+    max_segments = max(1, int(available_for_transcript / tokens_per_segment))
     chunks = _chunk_segments(segments, max_segments)
     logger.info(
-        "Transcript too long (%d segments, ~%d tokens), splitting into %d chunks of ~%d segments",
+        "Transcript too long (%d segments, ~%d tokens, ~%d available), "
+        "splitting into %d chunks of ~%d segments",
         len(segments),
-        int(estimated_tokens),
+        int(estimated_transcript_tokens),
+        int(available_for_transcript),
         len(chunks),
         max_segments,
     )
@@ -518,11 +773,7 @@ def _apply_correction_chunked(
     all_warnings = []
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d/%d (%d segments)", i + 1, len(chunks), len(chunk))
-        formatted = format_diarization_lm(chunk)
-        prompt = prompt_builder(formatted)
-        raw_output = backend.generate(prompt)
-        corrected = parse_diarization_lm(raw_output)
-        safe_segments, warnings = tpst_check(chunk, corrected)
+        safe_segments, warnings = _process_chunk(chunk)
         all_corrected.extend(safe_segments)
         all_warnings.extend(warnings)
 
@@ -547,11 +798,9 @@ def run_llm_postprocess(
         3. **Task 1** — Speaker correction (if enabled):
            ``format -> prompt -> generate -> parse -> tpst_check``
         4. **Task 2** — Text correction (if enabled):
-           ``format -> prompt -> generate -> parse -> tpst_check``
-        5. **Task 3** — Summary (if enabled):
-           ``prompt -> generate``
-        6. ``backend.unload()``
-        7. Return result dict.
+           ``format -> prompt -> generate -> parse``
+        5. ``backend.unload()``
+        6. Return result dict.
 
     Args:
         segments: List of transcript segment dicts (``speaker``, ``text``, etc.).
@@ -559,12 +808,11 @@ def run_llm_postprocess(
         backend: Optional pre-created backend (useful for testing / injection).
 
     Returns:
-        Dict with keys ``segments``, ``summary``, and ``warnings``.
+        Dict with keys ``segments`` and ``warnings``.
     """
     tasks = config.get("llm", {}).get("tasks", {})
     all_warnings: list[str] = []
     current_segments = segments
-    summary: str | None = None
 
     # 1. Resolve backend
     if backend is None:
@@ -590,10 +838,12 @@ def run_llm_postprocess(
                 build_speaker_correction_prompt,
                 backend,
                 n_ctx,
+                output_processor=_process_json_speaker_output,
+                max_output_tokens=1024,
             )
             all_warnings.extend(warnings)
 
-        # 4. Task 2: Text correction
+        # 4. Task 2: Text correction (JSON error-pair output)
         if tasks.get("text_correction", False):
             logger.info("Running LLM task: text correction")
             current_segments, warnings = _apply_correction_chunked(
@@ -601,23 +851,15 @@ def run_llm_postprocess(
                 build_text_correction_prompt,
                 backend,
                 n_ctx,
+                output_processor=_process_json_text_output,
+                max_output_tokens=1024,
             )
             all_warnings.extend(warnings)
 
-        # 5. Task 3: Summary (uses full transcript — truncate if needed)
-        if tasks.get("summarization", False):
-            logger.info("Running LLM task: summarization")
-            formatted = format_diarization_lm(current_segments)
-            prompt = build_summary_prompt(formatted)
-            summary = backend.generate(prompt)
-
     finally:
-        # 6. Always unload
         backend.unload()
 
-    # 7. Return result
     return {
         "segments": current_segments,
-        "summary": summary,
         "warnings": all_warnings,
     }
