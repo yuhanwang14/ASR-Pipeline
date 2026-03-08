@@ -28,7 +28,7 @@ jobs:
       - name: Install test dependencies (CPU-only, no GPU packages)
         run: |
           pip install --upgrade pip
-          pip install pytest pytest-cov pytest-mock
+          pip install pytest pytest-cov pytest-mock jiwer
           pip install pyyaml numpy scipy soundfile
           pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install -e . --no-deps
