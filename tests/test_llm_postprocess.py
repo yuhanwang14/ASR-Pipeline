@@ -90,7 +90,7 @@ def llm_config() -> dict:
             "model_path": "/fake/model.gguf",
             "model_id": "Qwen/Qwen3.5-9B",
             "backend": "llama-cpp",
-            "n_ctx": 8192,
+            "n_ctx": 16384,
             "n_gpu_layers": -1,
             "tasks": {
                 "speaker_correction": True,

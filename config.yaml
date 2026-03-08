@@ -22,7 +22,7 @@ diarization:
 # ASR
 asr:
   model: "Qwen/Qwen3-ASR-1.7B"
-  backend: "vllm"  # "vllm" (recommended) or "transformers" (fallback)
+  backend: "transformers"  # "vllm" (recommended) or "transformers" (fallback)
   dtype: "bfloat16"
   max_new_tokens: 4096
   language: null  # null = auto-detect (best for code-switching)
@@ -32,16 +32,15 @@ asr:
 
 # LLM post-processing
 llm:
-  model_path: null  # Path to GGUF file, or HuggingFace model ID
+  model_path: "models/Qwen3.5-9B-Q4_K_M.gguf"  # Path to GGUF file, or HuggingFace model ID
   model_id: "Qwen/Qwen3.5-9B"
   gguf_url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF"
   backend: "llama-cpp"  # "llama-cpp" or "transformers"
-  n_ctx: 8192
+  n_ctx: 16384
   n_gpu_layers: -1  # -1 = all layers on GPU
   tasks:
     speaker_correction: true
     text_correction: true
-    summarization: true
 
 # Output
 output:

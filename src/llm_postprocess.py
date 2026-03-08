@@ -76,6 +76,9 @@ class LlamaCppBackend:
             model_path=str(model_path),
             n_gpu_layers=n_gpu_layers,
             n_ctx=n_ctx,
+            flash_attn=True,
+            type_k=8,  # Q8_0 KV cache keys
+            type_v=8,  # Q8_0 KV cache values
         )
 
     def generate(self, prompt: str, max_tokens: int | None = None) -> str:
