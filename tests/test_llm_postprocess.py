@@ -136,6 +136,17 @@ class TestFormatDiarizationLM:
         result = format_diarization_lm(segments)
         assert "<speaker:SPEAKER_00>" in result
 
+    def test_numbered_formatting(self, simple_segments):
+        result = format_diarization_lm(simple_segments, numbered=True)
+        lines = result.strip().splitlines()
+        assert len(lines) == 2
+        assert lines[0] == "[0] <speaker:SPEAKER_00> Hello world"
+        assert lines[1] == "[1] <speaker:SPEAKER_01> Hi there"
+
+    def test_numbered_empty(self):
+        result = format_diarization_lm([], numbered=True)
+        assert result == ""
+
 
 class TestParseDiarizationLM:
     """Test parse_diarization_lm."""
@@ -215,6 +226,12 @@ class TestBuildSpeakerCorrectionPrompt:
         assert "Example input:" in prompt
         assert "Example output:" in prompt
 
+    def test_example_uses_numbered_lines(self):
+        prompt = build_speaker_correction_prompt("test")
+        assert "[0] <speaker:" in prompt
+        assert "[1] <speaker:" in prompt
+        assert "[brackets]" in prompt
+
     def test_includes_think_block(self):
         prompt = build_speaker_correction_prompt("test")
         assert "<think>\n</think>" in prompt
@@ -252,6 +269,12 @@ class TestBuildTextCorrectionPrompt:
     def test_includes_think_block(self):
         prompt = build_text_correction_prompt("test")
         assert "<think>\n</think>" in prompt
+
+    def test_example_uses_numbered_lines(self):
+        prompt = build_text_correction_prompt("test")
+        assert "[0] <speaker:" in prompt
+        assert "[1] <speaker:" in prompt
+        assert "[brackets]" in prompt
 
 
 # ===================================================================
@@ -816,6 +839,21 @@ class TestRunLLMPostprocess:
         assert result["segments"][0]["text"] == "Hello world"
         assert result["segments"][1]["text"] == "Hi there"
         assert result["warnings"] == []
+
+    def test_prompt_contains_numbered_lines(self, llm_config):
+        """Verify the prompt sent to the LLM has [N] prefixed transcript lines."""
+        llm_config["llm"]["tasks"]["speaker_correction"] = False
+
+        segments = [
+            {"speaker": "SPEAKER_00", "text": "hello world"},
+            {"speaker": "SPEAKER_01", "text": "hi there"},
+        ]
+        backend = MockLLMBackend(responses=["[]"])
+        run_llm_postprocess(segments, llm_config, backend=backend)
+
+        prompt = backend.generate_calls[0]
+        assert "[0] <speaker:SPEAKER_00> hello world" in prompt
+        assert "[1] <speaker:SPEAKER_01> hi there" in prompt
 
 
 # ===================================================================

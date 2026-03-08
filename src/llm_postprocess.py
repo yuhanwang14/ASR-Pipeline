@@ -99,7 +99,7 @@ class LlamaCppBackend:
             temperature=0.7,
             top_p=0.8,
             top_k=20,
-            presence_penalty=1.5,
+            present_penalty=1.5,
         )
         return result["choices"][0]["text"]
 
@@ -360,27 +360,39 @@ def apply_text_corrections(
     return result, warnings
 
 
-def format_diarization_lm(segments: list[dict]) -> str:
+def format_diarization_lm(segments: list[dict], *, numbered: bool = False) -> str:
     """Format segments as DiarizationLM text format.
 
     Each segment becomes a line: ``<speaker:LABEL> text``
 
+    When *numbered* is True, each line is prefixed with ``[N]`` so the LLM
+    can reference segments by their explicit index rather than counting lines.
+
     Args:
         segments: List of dicts with ``speaker`` and ``text`` keys.
+        numbered: If True, prefix each line with ``[N]``.
 
     Returns:
         Multi-line string in DiarizationLM format.
 
-    Example output::
+    Example output (numbered=False)::
 
         <speaker:SPEAKER_00> Hello world
         <speaker:SPEAKER_01> Hi there
+
+    Example output (numbered=True)::
+
+        [0] <speaker:SPEAKER_00> Hello world
+        [1] <speaker:SPEAKER_01> Hi there
     """
     lines: list[str] = []
-    for seg in segments:
+    for i, seg in enumerate(segments):
         speaker = seg.get("speaker", "UNKNOWN")
         text = seg.get("text", "")
-        lines.append(f"<speaker:{speaker}> {text}")
+        if numbered:
+            lines.append(f"[{i}] <speaker:{speaker}> {text}")
+        else:
+            lines.append(f"<speaker:{speaker}> {text}")
     return "\n".join(lines)
 
 
@@ -430,13 +442,13 @@ def build_speaker_correction_prompt(transcript: str) -> str:
         "Output ONLY a JSON array of corrections. If no corrections needed, output [].\n"
         "Each correction: "
         '{"line": N, "old_speaker": "SPEAKER_XX", "new_speaker": "SPEAKER_YY"}\n'
-        "where N is the 0-indexed line number.\n"
+        "where N is the number shown in [brackets] at the start of each line.\n"
         "<|im_end|>\n"
         "<|im_start|>user\n"
         "Example input:\n"
-        "<speaker:SPEAKER_00> 你好，我是小明。\n"
-        "<speaker:SPEAKER_00> 你好小明，我叫小红。\n"
-        "<speaker:SPEAKER_00> 小红你好，今天讨论什么？\n"
+        "[0] <speaker:SPEAKER_00> 你好，我是小明。\n"
+        "[1] <speaker:SPEAKER_00> 你好小明，我叫小红。\n"
+        "[2] <speaker:SPEAKER_00> 小红你好，今天讨论什么？\n"
         "\n"
         "Example output:\n"
         '[{"line": 1, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}]\n'
@@ -472,7 +484,7 @@ def build_text_correction_prompt(transcript: str) -> str:
         "Output ONLY a JSON array of corrections. If no errors, output [].\n"
         "Each correction: "
         '{"line": N, "original": "wrong text", "corrected": "fixed text"}\n'
-        "where N is the 0-indexed line number.\n"
+        "where N is the number shown in [brackets] at the start of each line.\n"
         "<|im_end|>\n"
         "<|im_start|>user\n"
         "Common ASR error patterns:\n"
@@ -482,8 +494,8 @@ def build_text_correction_prompt(transcript: str) -> str:
         "- Chinese homophones: 拒→剧\n"
         "\n"
         "Example input:\n"
-        "<speaker:SPEAKER_00> 今天简单think一下项目进度。\n"
-        "<speaker:SPEAKER_01> 好的，我觉得这个飞机给的feedback还行。\n"
+        "[0] <speaker:SPEAKER_00> 今天简单think一下项目进度。\n"
+        "[1] <speaker:SPEAKER_01> 好的，我觉得这个飞机给的feedback还行。\n"
         "\n"
         "Example output:\n"
         '[{"line": 0, "original": "think", "corrected": "sync"}, '
@@ -724,7 +736,7 @@ def _apply_correction_chunked(
     # CJK-heavy text tokenizes at ~2 chars/token in Qwen; mixed text ~2.5.
     # We use 2 as a conservative estimate to avoid under-chunking.
     chars_per_token = 2
-    formatted = format_diarization_lm(segments)
+    formatted = format_diarization_lm(segments, numbered=True)
     trial_prompt = prompt_builder(formatted)
     estimated_total_input = len(trial_prompt) / chars_per_token
     estimated_transcript_tokens = len(formatted) / chars_per_token
@@ -732,7 +744,7 @@ def _apply_correction_chunked(
 
     def _process_chunk(original_chunk):
         """Generate, parse, validate, and merge metadata for one chunk."""
-        fmt = format_diarization_lm(original_chunk)
+        fmt = format_diarization_lm(original_chunk, numbered=True)
         prompt = prompt_builder(fmt)
         raw_output = _strip_think_tags(backend.generate(prompt, max_tokens=max_output_tokens))
         return output_processor(original_chunk, raw_output)
