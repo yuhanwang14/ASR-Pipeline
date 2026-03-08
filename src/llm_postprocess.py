@@ -1,4 +1,4 @@
-"""LLM post-processing: speaker correction, text correction, summarization.
+"""LLM post-processing: speaker correction, text correction.
 
 Uses DiarizationLM-inspired prompting with TPST safety checks to prevent
 the LLM from hallucinating or altering transcribed words.
@@ -21,7 +21,7 @@ class LLMBackend(Protocol):
     """Protocol for LLM inference backends."""
 
     def load(self) -> None: ...
-    def generate(self, prompt: str) -> str: ...
+    def generate(self, prompt: str, max_tokens: int | None = None) -> str: ...
     def unload(self) -> None: ...
 
 
@@ -31,6 +31,7 @@ class LlamaCppBackend:
     def __init__(self, config: dict) -> None:
         self.config = config
         self.llm = None
+        self.n_ctx = config.get("llm", {}).get("n_ctx", 8192)
 
     def load(self) -> None:
         """Load GGUF model via llama-cpp-python."""
@@ -77,11 +78,26 @@ class LlamaCppBackend:
             n_ctx=n_ctx,
         )
 
-    def generate(self, prompt: str) -> str:
-        """Generate text from prompt."""
+    def generate(self, prompt: str, max_tokens: int | None = None) -> str:
+        """Generate text from prompt.
+
+        Args:
+            prompt: The input prompt string.
+            max_tokens: Maximum number of tokens to generate. Defaults to
+                n_ctx // 2 if not specified.
+        """
         if self.llm is None:
             raise RuntimeError("Model not loaded. Call load() first.")
-        result = self.llm(prompt, max_tokens=2048)
+        if max_tokens is None:
+            max_tokens = self.n_ctx // 2
+        result = self.llm(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            presence_penalty=1.5,
+        )
         return result["choices"][0]["text"]
 
     def unload(self) -> None:
@@ -110,6 +126,7 @@ class TransformersLLMBackend:
         self.config = config
         self.model = None
         self.tokenizer = None
+        self.n_ctx = config.get("llm", {}).get("n_ctx", 8192)
 
     def load(self) -> None:
         """Load model with 4-bit quantization via bitsandbytes."""
@@ -130,19 +147,31 @@ class TransformersLLMBackend:
         )
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    def generate(self, prompt: str) -> str:
-        """Tokenize, generate, and decode."""
+    def generate(self, prompt: str, max_tokens: int | None = None) -> str:
+        """Tokenize, generate, and decode.
+
+        Args:
+            prompt: The input prompt string.
+            max_tokens: Maximum number of new tokens to generate. Defaults to
+                n_ctx // 2 if not specified.
+        """
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("Model not loaded. Call load() first.")
 
         import torch  # Lazy import
 
+        if max_tokens is None:
+            max_tokens = self.n_ctx // 2
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=2048,
-                do_sample=False,
+                max_new_tokens=max_tokens,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.8,
+                top_k=20,
+                repetition_penalty=1.5,
             )
         # Decode only the newly generated tokens
         generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
@@ -174,6 +203,19 @@ class TransformersLLMBackend:
 # ---------------------------------------------------------------------------
 
 _SPEAKER_TAG_RE = re.compile(r"<speaker:(\w+)>")
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+_THINK_UNCLOSED_RE = re.compile(r"<think>.*", re.DOTALL)
+
+
+def _strip_think_tags(text: str) -> str:
+    """Strip Qwen3.5 ``<think>...</think>`` reasoning blocks from output.
+
+    Handles both closed ``<think>...</think>`` blocks and unclosed ``<think>``
+    blocks (when the model runs out of tokens during reasoning).
+    """
+    text = _THINK_RE.sub("", text)
+    text = _THINK_UNCLOSED_RE.sub("", text)
+    return text.strip()
 
 
 def format_diarization_lm(segments: list[dict]) -> str:
@@ -233,6 +275,7 @@ def build_speaker_correction_prompt(transcript: str) -> str:
 
     Instructs the LLM to only change ``<speaker:XX>`` tags and never touch the
     transcribed words.  Template follows the DiarizationLM approach.
+    Uses Qwen ChatML format for reliable instruction following.
 
     Args:
         transcript: Transcript in DiarizationLM text format.
@@ -240,21 +283,32 @@ def build_speaker_correction_prompt(transcript: str) -> str:
     Returns:
         Full prompt string ready for LLM generation.
     """
+    n_lines = len(transcript.strip().splitlines())
     return (
-        "You are a transcript editor. Below is a speaker-diarized transcript that may have "
-        "speaker attribution errors. Based on conversational context and semantic coherence, "
-        "correct the speaker labels ONLY. Do NOT modify any words in the transcript.\n"
+        "<|im_start|>system\n"
+        "You correct speaker labels in diarized transcripts. "
+        "You MUST output every line verbatim, only changing <speaker:XX> tags.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n"
+        "Example input:\n"
+        "<speaker:SPEAKER_00> 你好，我是小明。\n"
+        "<speaker:SPEAKER_00> 你好小明，我叫小红。\n"
+        "<speaker:SPEAKER_00> 小红你好，今天讨论什么？\n"
         "\n"
-        "Rules:\n"
-        "1. Only change <speaker:XX> tags\n"
-        "2. Never add, remove, or modify any spoken words\n"
-        "3. Use conversational flow to determine correct speaker assignments\n"
-        "4. If unsure, keep the original label\n"
+        "Example output:\n"
+        "<speaker:SPEAKER_00> 你好，我是小明。\n"
+        "<speaker:SPEAKER_01> 你好小明，我叫小红。\n"
+        "<speaker:SPEAKER_00> 小红你好，今天讨论什么？\n"
         "\n"
-        "Transcript:\n"
+        f"Now correct this transcript. Output EXACTLY {n_lines} lines. "
+        "Copy every word verbatim — only change <speaker:XX> tags where the speaker "
+        "attribution is clearly wrong based on conversational context. "
+        "If unsure, keep the original label.\n"
+        "\n"
         f"{transcript}\n"
-        "\n"
-        "Output the corrected transcript in the same format:\n"
+        "<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n</think>\n"
     )
 
 
@@ -263,6 +317,7 @@ def build_text_correction_prompt(transcript: str) -> str:
 
     Instructs the LLM to fix ASR errors, homophones, and punctuation while
     preserving code-switching style. Speaker labels must remain untouched.
+    Uses Qwen ChatML format for reliable instruction following.
 
     Args:
         transcript: Transcript in DiarizationLM text format.
@@ -270,47 +325,35 @@ def build_text_correction_prompt(transcript: str) -> str:
     Returns:
         Full prompt string ready for LLM generation.
     """
+    n_lines = len(transcript.strip().splitlines())
     return (
-        "You are a transcript proofreader for Chinese-English code-switched speech. "
-        "Fix obvious ASR errors (homophones, misheard words) while preserving the "
-        "original meaning. Fix punctuation. Do NOT change speaker labels.\n"
+        "<|im_start|>system\n"
+        "You proofread Chinese-English code-switched ASR transcripts. "
+        "Fix recognition errors while preserving every line and every speaker label exactly.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n"
+        "Common ASR errors in Chinese-English code-switching:\n"
+        "- English words misheard as Chinese: sync→想/think, demo→带我, VC→飞机\n"
+        "- Acronyms garbled: SDK→SCK, PEVC→P2V, SOTA→saota\n"
+        "- English phrases heard as Chinese: fund raising→Fun Reason, moat→Mot\n"
+        "- Chinese homophones: 拒→剧, funding→founding\n"
         "\n"
-        "Rules:\n"
-        "1. Fix clear errors only — do not rephrase or paraphrase\n"
-        "2. Preserve code-switching style (don't translate Chinese to English or vice versa)\n"
-        "3. Fix punctuation and sentence boundaries\n"
-        "4. Keep all speaker labels unchanged\n"
+        "Example input:\n"
+        "<speaker:SPEAKER_00> 今天简单think一下项目进度。\n"
+        "<speaker:SPEAKER_01> 好的，我觉得这个飞机给的feedback还行。\n"
         "\n"
-        "Transcript:\n"
+        "Example output:\n"
+        "<speaker:SPEAKER_00> 今天简单sync一下项目进度。\n"
+        "<speaker:SPEAKER_01> 好的，我觉得这个VC给的feedback还行。\n"
+        "\n"
+        f"Now fix ASR errors in this transcript. Output EXACTLY {n_lines} lines. "
+        "Keep all <speaker:XX> tags and line structure unchanged. "
+        "Only fix clear misrecognitions — do not rephrase, summarize, or merge lines.\n"
+        "\n"
         f"{transcript}\n"
-        "\n"
-        "Output the corrected transcript:\n"
-    )
-
-
-def build_summary_prompt(transcript: str) -> str:
-    """Build prompt for summary generation.
-
-    Asks for key points, decisions, and action items in the same language mix
-    as the original transcript.
-
-    Args:
-        transcript: Transcript in DiarizationLM text format (or plain text).
-
-    Returns:
-        Full prompt string ready for LLM generation.
-    """
-    return (
-        "Summarize the following meeting transcript. Include:\n"
-        "1. Key discussion points\n"
-        "2. Decisions made\n"
-        "3. Action items with assigned speakers\n"
-        "Output in the same language mix as the original transcript.\n"
-        "\n"
-        "Transcript:\n"
-        f"{transcript}\n"
-        "\n"
-        "Summary:\n"
+        "<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n</think>\n"
     )
 
 
@@ -471,6 +514,8 @@ def _apply_correction_chunked(
     prompt_builder,
     backend,
     n_ctx: int,
+    *,
+    use_tpst: bool = True,
 ) -> tuple[list[dict], list[str]]:
     """Apply LLM correction in chunks that fit the context window.
 
@@ -482,34 +527,62 @@ def _apply_correction_chunked(
         prompt_builder: Function that builds prompt from formatted text.
         backend: LLM backend with .generate() method.
         n_ctx: Context window size in tokens.
+        use_tpst: If True, run TPST safety check on each chunk (appropriate
+            for speaker correction where words must not change). If False,
+            accept the LLM output directly (appropriate for text correction
+            where fixing misrecognised words is the goal).
 
     Returns:
         (corrected_segments, warnings)
     """
-    # Estimate: prompt template ~200 tokens, each segment ~avg chars/3 tokens
-    # Reserve half the context for output (LLM reproduces the transcript)
-    available_tokens = n_ctx // 2 - 200
-    # Rough estimate: 1 token per 3 chars for mixed CJK/English
-    total_chars = sum(len(s.get("text", "")) + 30 for s in segments)  # +30 for speaker tag
-    chars_per_token = 3
-    estimated_tokens = total_chars / chars_per_token
+    # Build a trial prompt to measure actual size, then estimate tokens.
+    # CJK-heavy text tokenizes at ~2 chars/token in Qwen; mixed text ~2.5.
+    # We use 2 as a conservative estimate to avoid under-chunking.
+    formatted = format_diarization_lm(segments)
+    trial_prompt = prompt_builder(formatted)
+    chars_per_token = 2
+    estimated_prompt_tokens = len(trial_prompt) / chars_per_token
+    estimated_transcript_tokens = len(formatted) / chars_per_token
+    # Output must fit: prompt + output <= n_ctx
+    available_tokens = n_ctx - estimated_prompt_tokens
 
-    if estimated_tokens <= available_tokens:
-        # Fits in one shot
-        formatted = format_diarization_lm(segments)
-        prompt = prompt_builder(formatted)
-        raw_output = backend.generate(prompt)
+    def _process_chunk(original_chunk):
+        """Generate, parse, validate, and merge metadata for one chunk."""
+        fmt = format_diarization_lm(original_chunk)
+        prompt = prompt_builder(fmt)
+        raw_output = _strip_think_tags(backend.generate(prompt))
         corrected = parse_diarization_lm(raw_output)
-        return tpst_check(segments, corrected)
+
+        if use_tpst:
+            corrected, warnings = tpst_check(original_chunk, corrected)
+        else:
+            warnings = []
+
+        # Merge corrected speaker/text back into originals to preserve
+        # timestamps and other metadata (start, end, etc.).
+        merged = []
+        for j, orig in enumerate(original_chunk):
+            entry = dict(orig)  # shallow copy — keeps start, end, etc.
+            if j < len(corrected):
+                entry["speaker"] = corrected[j].get("speaker", orig.get("speaker"))
+                entry["text"] = corrected[j].get("text", orig.get("text", ""))
+            merged.append(entry)
+        return merged, warnings
+
+    if estimated_transcript_tokens <= available_tokens:
+        # Fits in one shot
+        return _process_chunk(segments)
 
     # Need to chunk
-    tokens_per_segment = estimated_tokens / len(segments)
+    tokens_per_segment = estimated_transcript_tokens / len(segments)
     max_segments = max(1, int(available_tokens / tokens_per_segment))
     chunks = _chunk_segments(segments, max_segments)
     logger.info(
-        "Transcript too long (%d segments, ~%d tokens), splitting into %d chunks of ~%d segments",
+        "Transcript too long (%d segments, ~%d tokens, ~%d available), "
+        "splitting into %d chunks of ~%d segments",
         len(segments),
-        int(estimated_tokens),
+        int(estimated_transcript_tokens),
+        int(available_tokens),
         len(chunks),
         max_segments,
     )
@@ -518,11 +591,7 @@ def _apply_correction_chunked(
     all_warnings = []
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d/%d (%d segments)", i + 1, len(chunks), len(chunk))
-        formatted = format_diarization_lm(chunk)
-        prompt = prompt_builder(formatted)
-        raw_output = backend.generate(prompt)
-        corrected = parse_diarization_lm(raw_output)
-        safe_segments, warnings = tpst_check(chunk, corrected)
+        safe_segments, warnings = _process_chunk(chunk)
         all_corrected.extend(safe_segments)
         all_warnings.extend(warnings)
 
@@ -547,11 +616,9 @@ def run_llm_postprocess(
         3. **Task 1** — Speaker correction (if enabled):
            ``format -> prompt -> generate -> parse -> tpst_check``
         4. **Task 2** — Text correction (if enabled):
-           ``format -> prompt -> generate -> parse -> tpst_check``
-        5. **Task 3** — Summary (if enabled):
-           ``prompt -> generate``
-        6. ``backend.unload()``
-        7. Return result dict.
+           ``format -> prompt -> generate -> parse``
+        5. ``backend.unload()``
+        6. Return result dict.
 
     Args:
         segments: List of transcript segment dicts (``speaker``, ``text``, etc.).
@@ -559,12 +626,11 @@ def run_llm_postprocess(
         backend: Optional pre-created backend (useful for testing / injection).
 
     Returns:
-        Dict with keys ``segments``, ``summary``, and ``warnings``.
+        Dict with keys ``segments`` and ``warnings``.
     """
     tasks = config.get("llm", {}).get("tasks", {})
     all_warnings: list[str] = []
     current_segments = segments
-    summary: str | None = None
 
     # 1. Resolve backend
     if backend is None:
@@ -593,7 +659,7 @@ def run_llm_postprocess(
             )
             all_warnings.extend(warnings)
 
-        # 4. Task 2: Text correction
+        # 4. Task 2: Text correction (no TPST — fixing words is the goal)
         if tasks.get("text_correction", False):
             logger.info("Running LLM task: text correction")
             current_segments, warnings = _apply_correction_chunked(
@@ -601,23 +667,14 @@ def run_llm_postprocess(
                 build_text_correction_prompt,
                 backend,
                 n_ctx,
+                use_tpst=False,
             )
             all_warnings.extend(warnings)
 
-        # 5. Task 3: Summary (uses full transcript — truncate if needed)
-        if tasks.get("summarization", False):
-            logger.info("Running LLM task: summarization")
-            formatted = format_diarization_lm(current_segments)
-            prompt = build_summary_prompt(formatted)
-            summary = backend.generate(prompt)
-
     finally:
-        # 6. Always unload
         backend.unload()
 
-    # 7. Return result
     return {
         "segments": current_segments,
-        "summary": summary,
         "warnings": all_warnings,
     }

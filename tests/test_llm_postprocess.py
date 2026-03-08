@@ -12,7 +12,6 @@ from src.llm_postprocess import (
     LLMBackend,
     _extract_words,
     build_speaker_correction_prompt,
-    build_summary_prompt,
     build_text_correction_prompt,
     format_diarization_lm,
     parse_diarization_lm,
@@ -38,7 +37,7 @@ class MockLLMBackend:
     def load(self) -> None:
         self.loaded = True
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, max_tokens: int | None = None) -> str:
         self.generate_calls.append(prompt)
         if self._call_idx < len(self.responses):
             resp = self.responses[self._call_idx]
@@ -91,7 +90,6 @@ def llm_config() -> dict:
             "tasks": {
                 "speaker_correction": True,
                 "text_correction": True,
-                "summarization": True,
             },
         }
     }
@@ -188,8 +186,8 @@ class TestBuildSpeakerCorrectionPrompt:
     def test_contains_required_instructions(self):
         prompt = build_speaker_correction_prompt("dummy transcript")
         assert "speaker" in prompt.lower()
-        assert "Only change <speaker:XX> tags" in prompt
-        assert "Never add, remove, or modify any spoken words" in prompt
+        assert "only change" in prompt.lower() or "only changing" in prompt.lower()
+        assert "<speaker:XX>" in prompt
         assert "dummy transcript" in prompt
 
     def test_contains_all_rules(self):
@@ -202,42 +200,57 @@ class TestBuildSpeakerCorrectionPrompt:
         prompt = build_speaker_correction_prompt(transcript)
         assert transcript in prompt
 
+    def test_uses_chatml_format(self):
+        prompt = build_speaker_correction_prompt("test")
+        assert "<|im_start|>system" in prompt
+        assert "<|im_end|>" in prompt
+        assert "<|im_start|>assistant" in prompt
+
+    def test_includes_line_count(self):
+        transcript = "<speaker:SPEAKER_00> Hello\n<speaker:SPEAKER_01> World"
+        prompt = build_speaker_correction_prompt(transcript)
+        assert "EXACTLY 2 lines" in prompt
+
+    def test_includes_few_shot_example(self):
+        prompt = build_speaker_correction_prompt("test")
+        assert "Example input:" in prompt or "Example output:" in prompt
+
 
 class TestBuildTextCorrectionPrompt:
     """Test build_text_correction_prompt."""
 
     def test_contains_required_instructions(self):
         prompt = build_text_correction_prompt("dummy transcript")
-        assert "proofreader" in prompt.lower()
+        assert "proofread" in prompt.lower()
         assert "code-switch" in prompt.lower()
-        assert "homophones" in prompt.lower() or "misheard" in prompt.lower()
+        assert "misrecogni" in prompt.lower() or "misheard" in prompt.lower()
         assert "dummy transcript" in prompt
 
     def test_preserves_code_switching(self):
         prompt = build_text_correction_prompt("test")
-        assert "don't translate" in prompt.lower() or "preserve code-switching" in prompt.lower()
+        # Prompt should show code-switching error examples rather than just saying "preserve"
+        assert "code-switching" in prompt.lower() or "code-switch" in prompt.lower()
 
     def test_do_not_change_speaker_labels(self):
         prompt = build_text_correction_prompt("test")
-        assert (
-            "speaker labels unchanged" in prompt.lower()
-            or "do not change speaker" in prompt.lower()
+        assert "speaker" in prompt.lower() and (
+            "unchanged" in prompt.lower() or "keep" in prompt.lower()
         )
 
+    def test_uses_chatml_format(self):
+        prompt = build_text_correction_prompt("test")
+        assert "<|im_start|>system" in prompt
+        assert "<|im_end|>" in prompt
+        assert "<|im_start|>assistant" in prompt
 
-class TestBuildSummaryPrompt:
-    """Test build_summary_prompt."""
+    def test_includes_line_count(self):
+        transcript = "<speaker:SPEAKER_00> Hello\n<speaker:SPEAKER_01> World"
+        prompt = build_text_correction_prompt(transcript)
+        assert "EXACTLY 2 lines" in prompt
 
-    def test_contains_required_instructions(self):
-        prompt = build_summary_prompt("dummy transcript")
-        assert "summarize" in prompt.lower()
-        assert "key" in prompt.lower()
-        assert "action items" in prompt.lower()
-        assert "dummy transcript" in prompt
-
-    def test_same_language_mix(self):
-        prompt = build_summary_prompt("test")
-        assert "same language" in prompt.lower()
+    def test_includes_error_examples(self):
+        prompt = build_text_correction_prompt("test")
+        assert "sync" in prompt or "demo" in prompt or "VC" in prompt
 
 
 # ===================================================================
@@ -443,8 +456,6 @@ class TestRunLLMPostprocess:
                 "<speaker:SPEAKER_01> Hello world\n<speaker:SPEAKER_00> Hi there",
                 # text correction response (add punctuation only)
                 "<speaker:SPEAKER_01> Hello, world!\n<speaker:SPEAKER_00> Hi there.",
-                # summary
-                "Two people greeted each other.",
             ]
         )
         run_llm_postprocess(simple_segments, llm_config, backend=backend)
@@ -458,30 +469,24 @@ class TestRunLLMPostprocess:
                 "<speaker:SPEAKER_01> Hello world\n<speaker:SPEAKER_00> Hi there",
                 # text correction
                 "<speaker:SPEAKER_01> Hello, world!\n<speaker:SPEAKER_00> Hi there.",
-                # summary
-                "Summary text here.",
             ]
         )
         result = run_llm_postprocess(simple_segments, llm_config, backend=backend)
-        assert len(backend.generate_calls) == 3
-        assert result["summary"] == "Summary text here."
+        assert len(backend.generate_calls) == 2
 
     def test_skips_disabled_tasks(self, simple_segments, llm_config):
         llm_config["llm"]["tasks"]["speaker_correction"] = False
         llm_config["llm"]["tasks"]["text_correction"] = False
-        llm_config["llm"]["tasks"]["summarization"] = False
 
         backend = MockLLMBackend(responses=[])
         result = run_llm_postprocess(simple_segments, llm_config, backend=backend)
 
         assert len(backend.generate_calls) == 0
         assert result["segments"] == simple_segments
-        assert result["summary"] is None
         assert result["warnings"] == []
 
     def test_only_speaker_correction(self, simple_segments, llm_config):
         llm_config["llm"]["tasks"]["text_correction"] = False
-        llm_config["llm"]["tasks"]["summarization"] = False
 
         backend = MockLLMBackend(
             responses=[
@@ -494,23 +499,10 @@ class TestRunLLMPostprocess:
         # Speakers should be swapped
         assert result["segments"][0]["speaker"] == "SPEAKER_01"
         assert result["segments"][1]["speaker"] == "SPEAKER_00"
-        assert result["summary"] is None
-
-    def test_only_summarization(self, simple_segments, llm_config):
-        llm_config["llm"]["tasks"]["speaker_correction"] = False
-        llm_config["llm"]["tasks"]["text_correction"] = False
-
-        backend = MockLLMBackend(responses=["A great summary."])
-        result = run_llm_postprocess(simple_segments, llm_config, backend=backend)
-
-        assert len(backend.generate_calls) == 1
-        assert result["segments"] == simple_segments  # Unchanged
-        assert result["summary"] == "A great summary."
 
     def test_tpst_fallback_on_hallucination(self, simple_segments, llm_config):
         """When the LLM hallucinates new words, TPST should revert to originals."""
         llm_config["llm"]["tasks"]["text_correction"] = False
-        llm_config["llm"]["tasks"]["summarization"] = False
 
         # LLM adds a word ("beautiful") — this should be caught
         backend = MockLLMBackend(
@@ -552,13 +544,11 @@ class TestRunLLMPostprocess:
     def test_result_structure(self, simple_segments, llm_config):
         llm_config["llm"]["tasks"]["speaker_correction"] = False
         llm_config["llm"]["tasks"]["text_correction"] = False
-        llm_config["llm"]["tasks"]["summarization"] = False
 
         backend = MockLLMBackend()
         result = run_llm_postprocess(simple_segments, llm_config, backend=backend)
 
         assert "segments" in result
-        assert "summary" in result
         assert "warnings" in result
         assert isinstance(result["segments"], list)
         assert isinstance(result["warnings"], list)
@@ -566,7 +556,6 @@ class TestRunLLMPostprocess:
     def test_pipeline_with_chinese_english(self, chinese_english_segments, llm_config):
         """Full pipeline with code-switched content, only speaker correction enabled."""
         llm_config["llm"]["tasks"]["text_correction"] = False
-        llm_config["llm"]["tasks"]["summarization"] = False
 
         # Swap speakers for first two segments (words stay the same)
         backend = MockLLMBackend(
