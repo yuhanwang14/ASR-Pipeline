@@ -6,6 +6,7 @@ import pytest
 
 from src.eval_metrics import (
     compute_cer,
+    compute_cpwer,
     compute_wer,
     load_pipeline_output,
     normalize_for_eval,
@@ -146,3 +147,54 @@ class TestComputeWer:
         # "剧" → "拒" = 1 substitution out of 4 tokens
         wer = compute_wer("他当时剧的时候", "他当时拒的时候")
         assert 0.0 < wer < 0.5
+
+
+class TestComputeCpwer:
+
+    def test_identical_text_different_labels(self):
+        ref = [{"speaker": "A", "text": "hello"}, {"speaker": "B", "text": "world"}]
+        hyp = [{"speaker": "X", "text": "hello"}, {"speaker": "Y", "text": "world"}]
+        result = compute_cpwer(ref, hyp)
+        assert result["cpwer"] == 0.0
+        # Optimal mapping should map X→A, Y→B
+        assert result["mapping"]["X"] == "A"
+        assert result["mapping"]["Y"] == "B"
+
+    def test_empty_segments(self):
+        result = compute_cpwer([], [])
+        assert result["cpwer"] == 0.0
+
+    def test_speaker_count_mismatch(self):
+        ref = [
+            {"speaker": "A", "text": "hello"},
+            {"speaker": "B", "text": "world"},
+        ]
+        hyp = [{"speaker": "X", "text": "hello world"}]
+        result = compute_cpwer(ref, hyp)
+        assert "mapping" in result
+        assert "cpwer" in result
+
+    def test_per_speaker_metrics(self):
+        ref = [
+            {"speaker": "A", "text": "hello world"},
+            {"speaker": "B", "text": "foo bar"},
+        ]
+        hyp = [
+            {"speaker": "X", "text": "hello world"},
+            {"speaker": "Y", "text": "foo bar"},
+        ]
+        result = compute_cpwer(ref, hyp)
+        assert "A" in result["per_speaker"]
+        assert result["per_speaker"]["A"]["cer"] == 0.0
+
+    def test_nonzero_cpwer_with_errors(self):
+        ref = [
+            {"speaker": "A", "text": "hello world"},
+            {"speaker": "B", "text": "foo bar"},
+        ]
+        hyp = [
+            {"speaker": "X", "text": "hello earth"},
+            {"speaker": "Y", "text": "foo baz"},
+        ]
+        result = compute_cpwer(ref, hyp)
+        assert result["cpwer"] > 0.0
