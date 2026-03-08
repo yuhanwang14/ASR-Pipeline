@@ -6,8 +6,29 @@ build-backend = "setuptools.build_meta"
 name = "transcription-pipeline"
 version = "0.1.0"
 description = "Local GPU-accelerated speech transcription with speaker diarization and LLM post-processing"
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
-authors = [{name = "ASR Pipeline"}]
+authors = [{name = "yuhanwang14"}]
+keywords = ["speech", "transcription", "asr", "diarization", "speaker", "gpu", "chinese", "english"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+[project.urls]
+Homepage = "https://github.com/yuhanwang14/ASR-Pipeline"
+Repository = "https://github.com/yuhanwang14/ASR-Pipeline"
+Issues = "https://github.com/yuhanwang14/ASR-Pipeline/issues"
 
 dependencies = [
     # Audio processing
