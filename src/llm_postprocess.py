@@ -634,21 +634,46 @@ def tpst_check(original: list[dict], corrected: list[dict]) -> tuple[list[dict],
 # ---------------------------------------------------------------------------
 
 
-def _chunk_segments(segments: list[dict], max_segments_per_chunk: int) -> list[list[dict]]:
-    """Split segments into chunks that fit within context window.
+def _chunk_segments(
+    segments: list[dict],
+    max_segments_per_chunk: int,
+) -> list[list[dict]]:
+    """Split segments into chunks, preferring speaker-turn boundaries.
+
+    Avoids splitting in the middle of a speaker turn (consecutive segments
+    with the same speaker).
 
     Args:
         segments: All transcript segments.
-        max_segments_per_chunk: Max segments per chunk.
+        max_segments_per_chunk: Target max segments per chunk.
 
     Returns:
-        List of segment chunks.
+        List of segment chunks. All original segments appear exactly once.
     """
     if not segments:
         return []
-    chunks = []
-    for i in range(0, len(segments), max_segments_per_chunk):
-        chunks.append(segments[i : i + max_segments_per_chunk])
+    if len(segments) <= max_segments_per_chunk:
+        return [segments]
+
+    # Find speaker-turn boundary indices
+    boundaries: list[int] = [0]
+    for i in range(1, len(segments)):
+        if segments[i].get("speaker") != segments[i - 1].get("speaker"):
+            boundaries.append(i)
+
+    chunks: list[list[dict]] = []
+    chunk_start = 0
+    while chunk_start < len(segments):
+        chunk_end = min(chunk_start + max_segments_per_chunk, len(segments))
+        if chunk_end < len(segments):
+            # Find nearest speaker-turn boundary at or before chunk_end
+            best = chunk_start + 1  # minimum 1 segment
+            for b in boundaries:
+                if chunk_start < b <= chunk_end:
+                    best = b
+            chunk_end = best
+        chunks.append(segments[chunk_start:chunk_end])
+        chunk_start = chunk_end
     return chunks
 
 

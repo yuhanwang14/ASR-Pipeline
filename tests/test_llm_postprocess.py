@@ -816,3 +816,77 @@ class TestRunLLMPostprocess:
         assert result["segments"][0]["text"] == "Hello world"
         assert result["segments"][1]["text"] == "Hi there"
         assert result["warnings"] == []
+
+
+# ===================================================================
+# Speaker-turn-aware chunking tests
+# ===================================================================
+
+
+class TestChunkSegmentsBySpeakerTurn:
+    """Test _chunk_segments with speaker-turn-aware boundaries."""
+
+    def test_no_chunking_needed(self):
+        from src.llm_postprocess import _chunk_segments
+
+        segments = [
+            {"speaker": "S0", "text": "hello"},
+            {"speaker": "S1", "text": "world"},
+        ]
+        chunks = _chunk_segments(segments, 10)
+        assert len(chunks) == 1
+        assert chunks[0] == segments
+
+    def test_splits_at_speaker_turn(self):
+        from src.llm_postprocess import _chunk_segments
+
+        segments = [
+            {"speaker": "S0", "text": "a"},
+            {"speaker": "S0", "text": "b"},
+            {"speaker": "S1", "text": "c"},
+            {"speaker": "S1", "text": "d"},
+            {"speaker": "S0", "text": "e"},
+            {"speaker": "S0", "text": "f"},
+        ]
+        chunks = _chunk_segments(segments, 3)
+        assert len(chunks) >= 2
+        # All original segments are covered exactly once
+        flat = [seg for chunk in chunks for seg in chunk]
+        assert flat == segments
+
+    def test_does_not_split_mid_turn(self):
+        from src.llm_postprocess import _chunk_segments
+
+        segments = [
+            {"speaker": "S0", "text": "a"},
+            {"speaker": "S0", "text": "b"},
+            {"speaker": "S0", "text": "c"},
+            {"speaker": "S1", "text": "d"},
+        ]
+        # max=3 should split at speaker boundary (index 3), not mid-S0-turn
+        chunks = _chunk_segments(segments, 3)
+        assert chunks[0] == segments[:3]
+        assert chunks[1] == segments[3:]
+
+    def test_single_segment(self):
+        from src.llm_postprocess import _chunk_segments
+
+        segments = [{"speaker": "S0", "text": "hello"}]
+        chunks = _chunk_segments(segments, 5)
+        assert len(chunks) == 1
+
+    def test_empty_segments(self):
+        from src.llm_postprocess import _chunk_segments
+
+        assert _chunk_segments([], 5) == []
+
+    def test_all_same_speaker(self):
+        from src.llm_postprocess import _chunk_segments
+
+        segments = [{"speaker": "S0", "text": str(i)} for i in range(6)]
+        chunks = _chunk_segments(segments, 3)
+        # No speaker boundaries available, falls back to max chunk size
+        flat = [seg for chunk in chunks for seg in chunk]
+        assert flat == segments
+        # Should still produce multiple chunks
+        assert len(chunks) >= 2
