@@ -3,6 +3,7 @@
 Covers:
 - Pure function tests (format, parse, prompt builders)
 - TPST safety check tests (critical for preventing hallucination)
+- JSON text correction tests (parse, validate, apply)
 - Integration tests with a mock backend
 """
 
@@ -11,12 +12,15 @@ import pytest
 from src.llm_postprocess import (
     LLMBackend,
     _extract_words,
+    apply_text_corrections,
     build_speaker_correction_prompt,
     build_text_correction_prompt,
     format_diarization_lm,
     parse_diarization_lm,
+    parse_json_corrections,
     run_llm_postprocess,
     tpst_check,
+    validate_text_correction,
 )
 
 # ---------------------------------------------------------------------------
@@ -217,25 +221,27 @@ class TestBuildSpeakerCorrectionPrompt:
 
 
 class TestBuildTextCorrectionPrompt:
-    """Test build_text_correction_prompt."""
+    """Test build_text_correction_prompt (JSON output format)."""
 
-    def test_contains_required_instructions(self):
-        prompt = build_text_correction_prompt("dummy transcript")
-        assert "proofread" in prompt.lower()
-        assert "code-switch" in prompt.lower()
-        assert "misrecogni" in prompt.lower() or "misheard" in prompt.lower()
-        assert "dummy transcript" in prompt
+    def test_requests_json_output(self):
+        prompt = build_text_correction_prompt("dummy")
+        assert "JSON" in prompt
+        assert "[]" in prompt
 
-    def test_preserves_code_switching(self):
+    def test_contains_error_examples(self):
         prompt = build_text_correction_prompt("test")
-        # Prompt should show code-switching error examples rather than just saying "preserve"
-        assert "code-switching" in prompt.lower() or "code-switch" in prompt.lower()
+        assert "sync" in prompt or "demo" in prompt or "VC" in prompt
 
-    def test_do_not_change_speaker_labels(self):
+    def test_includes_json_example(self):
         prompt = build_text_correction_prompt("test")
-        assert "speaker" in prompt.lower() and (
-            "unchanged" in prompt.lower() or "keep" in prompt.lower()
-        )
+        assert '"line"' in prompt
+        assert '"original"' in prompt
+        assert '"corrected"' in prompt
+
+    def test_includes_transcript(self):
+        transcript = "<speaker:SPEAKER_00> Hello\n<speaker:SPEAKER_01> World"
+        prompt = build_text_correction_prompt(transcript)
+        assert transcript in prompt
 
     def test_uses_chatml_format(self):
         prompt = build_text_correction_prompt("test")
@@ -243,14 +249,158 @@ class TestBuildTextCorrectionPrompt:
         assert "<|im_end|>" in prompt
         assert "<|im_start|>assistant" in prompt
 
-    def test_includes_line_count(self):
-        transcript = "<speaker:SPEAKER_00> Hello\n<speaker:SPEAKER_01> World"
-        prompt = build_text_correction_prompt(transcript)
-        assert "EXACTLY 2 lines" in prompt
-
-    def test_includes_error_examples(self):
+    def test_includes_think_block(self):
         prompt = build_text_correction_prompt("test")
-        assert "sync" in prompt or "demo" in prompt or "VC" in prompt
+        assert "<think>\n</think>" in prompt
+
+
+# ===================================================================
+# JSON text correction tests
+# ===================================================================
+
+
+class TestParseJsonCorrections:
+    """Test parse_json_corrections."""
+
+    def test_valid_array(self):
+        raw = '[{"line": 0, "original": "think", "corrected": "sync"}]'
+        result = parse_json_corrections(raw)
+        assert len(result) == 1
+        assert result[0]["original"] == "think"
+
+    def test_empty_array(self):
+        assert parse_json_corrections("[]") == []
+
+    def test_no_corrections(self):
+        assert parse_json_corrections("") == []
+
+    def test_strips_preamble(self):
+        raw = 'Here are the corrections:\n[{"line": 0, "original": "a", "corrected": "b"}]'
+        result = parse_json_corrections(raw)
+        assert len(result) == 1
+
+    def test_strips_trailing_text(self):
+        raw = '[{"line": 0, "original": "a", "corrected": "b"}]\nDone!'
+        result = parse_json_corrections(raw)
+        assert len(result) == 1
+
+    def test_malformed_json(self):
+        assert parse_json_corrections("[{broken") == []
+
+    def test_not_an_array(self):
+        assert parse_json_corrections('{"line": 0}') == []
+
+    def test_multiple_corrections(self):
+        raw = '[{"line": 0, "original": "a", "corrected": "b"}, {"line": 2, "original": "c", "corrected": "d"}]'
+        result = parse_json_corrections(raw)
+        assert len(result) == 2
+
+
+class TestValidateTextCorrection:
+    """Test validate_text_correction."""
+
+    def test_valid_correction(self):
+        ok, _ = validate_text_correction(
+            "today think about it", {"original": "think", "corrected": "sync"}
+        )
+        assert ok is True
+
+    def test_original_not_in_segment(self):
+        ok, reason = validate_text_correction(
+            "hello world", {"original": "banana", "corrected": "apple"}
+        )
+        assert ok is False
+        assert "not found" in reason
+
+    def test_empty_original(self):
+        ok, _ = validate_text_correction("hello", {"original": "", "corrected": "x"})
+        assert ok is False
+
+    def test_empty_corrected(self):
+        ok, _ = validate_text_correction("hello", {"original": "hello", "corrected": ""})
+        assert ok is False
+
+    def test_no_change(self):
+        ok, _ = validate_text_correction("hello", {"original": "hello", "corrected": "hello"})
+        assert ok is False
+
+    def test_suspiciously_long_correction(self):
+        ok, reason = validate_text_correction("hi", {"original": "hi", "corrected": "a" * 100})
+        assert ok is False
+        assert "long" in reason.lower()
+
+
+class TestApplyTextCorrections:
+    """Test apply_text_corrections."""
+
+    def test_applies_valid_correction(self):
+        segments = [{"speaker": "S0", "text": "today think about it", "start": 0.0, "end": 1.0}]
+        corrections = [{"line": 0, "original": "think", "corrected": "sync"}]
+        result, warnings = apply_text_corrections(segments, corrections)
+        assert result[0]["text"] == "today sync about it"
+        assert result[0]["start"] == 0.0
+        assert warnings == []
+
+    def test_skips_invalid_line(self):
+        segments = [{"speaker": "S0", "text": "hello"}]
+        corrections = [{"line": 5, "original": "x", "corrected": "y"}]
+        result, warnings = apply_text_corrections(segments, corrections)
+        assert result[0]["text"] == "hello"
+        assert len(warnings) == 1
+
+    def test_skips_missing_original(self):
+        segments = [{"speaker": "S0", "text": "hello world"}]
+        corrections = [{"line": 0, "original": "banana", "corrected": "apple"}]
+        result, warnings = apply_text_corrections(segments, corrections)
+        assert result[0]["text"] == "hello world"
+        assert len(warnings) == 1
+
+    def test_rate_limits_corrections(self):
+        segments = [{"speaker": "S0", "text": "a b c"}]
+        corrections = [{"line": 0, "original": "a", "corrected": "x"}] * 25
+        result, warnings = apply_text_corrections(segments, corrections, max_corrections=20)
+        assert result[0]["text"] == "a b c"
+        assert any("hallucination" in w.lower() for w in warnings)
+
+    def test_empty_corrections(self):
+        segments = [{"speaker": "S0", "text": "hello"}]
+        result, warnings = apply_text_corrections(segments, [])
+        assert result[0]["text"] == "hello"
+        assert warnings == []
+
+    def test_multiple_corrections_different_lines(self):
+        segments = [
+            {"speaker": "S0", "text": "think about it"},
+            {"speaker": "S1", "text": "the 飞机 is good"},
+        ]
+        corrections = [
+            {"line": 0, "original": "think", "corrected": "sync"},
+            {"line": 1, "original": "飞机", "corrected": "VC"},
+        ]
+        result, warnings = apply_text_corrections(segments, corrections)
+        assert result[0]["text"] == "sync about it"
+        assert result[1]["text"] == "the VC is good"
+        assert warnings == []
+
+    def test_does_not_mutate_original(self):
+        segments = [{"speaker": "S0", "text": "hello world"}]
+        corrections = [{"line": 0, "original": "hello", "corrected": "hi"}]
+        apply_text_corrections(segments, corrections)
+        assert segments[0]["text"] == "hello world"
+
+    def test_negative_line_number(self):
+        segments = [{"speaker": "S0", "text": "hello"}]
+        corrections = [{"line": -1, "original": "hello", "corrected": "hi"}]
+        result, warnings = apply_text_corrections(segments, corrections)
+        assert result[0]["text"] == "hello"
+        assert len(warnings) == 1
+
+    def test_non_integer_line(self):
+        segments = [{"speaker": "S0", "text": "hello"}]
+        corrections = [{"line": "zero", "original": "hello", "corrected": "hi"}]
+        result, warnings = apply_text_corrections(segments, corrections)
+        assert result[0]["text"] == "hello"
+        assert len(warnings) == 1
 
 
 # ===================================================================
@@ -454,8 +604,8 @@ class TestRunLLMPostprocess:
             responses=[
                 # speaker correction response (same words, swapped speakers)
                 "<speaker:SPEAKER_01> Hello world\n<speaker:SPEAKER_00> Hi there",
-                # text correction response (add punctuation only)
-                "<speaker:SPEAKER_01> Hello, world!\n<speaker:SPEAKER_00> Hi there.",
+                # text correction response (JSON, no errors)
+                "[]",
             ]
         )
         run_llm_postprocess(simple_segments, llm_config, backend=backend)
@@ -467,11 +617,11 @@ class TestRunLLMPostprocess:
             responses=[
                 # speaker correction
                 "<speaker:SPEAKER_01> Hello world\n<speaker:SPEAKER_00> Hi there",
-                # text correction
-                "<speaker:SPEAKER_01> Hello, world!\n<speaker:SPEAKER_00> Hi there.",
+                # text correction (JSON, no errors)
+                "[]",
             ]
         )
-        result = run_llm_postprocess(simple_segments, llm_config, backend=backend)
+        run_llm_postprocess(simple_segments, llm_config, backend=backend)
         assert len(backend.generate_calls) == 2
 
     def test_skips_disabled_tasks(self, simple_segments, llm_config):
@@ -570,3 +720,51 @@ class TestRunLLMPostprocess:
         assert result["warnings"] == []
         assert result["segments"][0]["speaker"] == "SPEAKER_01"
         assert result["segments"][1]["speaker"] == "SPEAKER_00"
+
+    def test_text_correction_json_output(self, llm_config):
+        """Verify JSON correction is applied to segment text."""
+        llm_config["llm"]["tasks"]["speaker_correction"] = False
+
+        segments = [
+            {"speaker": "SPEAKER_00", "text": "today think about it", "start": 0.0, "end": 1.0},
+            {
+                "speaker": "SPEAKER_01",
+                "text": "the 飞机 feedback is good",
+                "start": 1.0,
+                "end": 2.0,
+            },
+        ]
+        backend = MockLLMBackend(
+            responses=[
+                '[{"line": 0, "original": "think", "corrected": "sync"}, '
+                '{"line": 1, "original": "飞机", "corrected": "VC"}]',
+            ]
+        )
+        result = run_llm_postprocess(segments, llm_config, backend=backend)
+
+        assert result["segments"][0]["text"] == "today sync about it"
+        assert result["segments"][1]["text"] == "the VC feedback is good"
+        assert result["segments"][0]["start"] == 0.0
+        assert result["warnings"] == []
+
+    def test_text_correction_no_errors(self, simple_segments, llm_config):
+        """Verify [] response leaves text unchanged."""
+        llm_config["llm"]["tasks"]["speaker_correction"] = False
+
+        backend = MockLLMBackend(responses=["[]"])
+        result = run_llm_postprocess(simple_segments, llm_config, backend=backend)
+
+        assert result["segments"][0]["text"] == "Hello world"
+        assert result["segments"][1]["text"] == "Hi there"
+        assert result["warnings"] == []
+
+    def test_text_correction_malformed_json_is_safe(self, simple_segments, llm_config):
+        """Verify bad JSON doesn't crash and leaves text unchanged."""
+        llm_config["llm"]["tasks"]["speaker_correction"] = False
+
+        backend = MockLLMBackend(responses=["[{broken json garbage"])
+        result = run_llm_postprocess(simple_segments, llm_config, backend=backend)
+
+        assert result["segments"][0]["text"] == "Hello world"
+        assert result["segments"][1]["text"] == "Hi there"
+        assert result["warnings"] == []
