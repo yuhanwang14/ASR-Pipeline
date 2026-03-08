@@ -12,6 +12,7 @@ import pytest
 from src.llm_postprocess import (
     LLMBackend,
     _extract_words,
+    apply_speaker_corrections,
     apply_text_corrections,
     build_speaker_correction_prompt,
     build_text_correction_prompt,
@@ -185,19 +186,18 @@ class TestParseDiarizationLM:
 
 
 class TestBuildSpeakerCorrectionPrompt:
-    """Test build_speaker_correction_prompt."""
+    """Test build_speaker_correction_prompt (JSON output format)."""
 
-    def test_contains_required_instructions(self):
-        prompt = build_speaker_correction_prompt("dummy transcript")
-        assert "speaker" in prompt.lower()
-        assert "only change" in prompt.lower() or "only changing" in prompt.lower()
-        assert "<speaker:XX>" in prompt
-        assert "dummy transcript" in prompt
+    def test_requests_json_output(self):
+        prompt = build_speaker_correction_prompt("dummy")
+        assert "JSON" in prompt
+        assert "[]" in prompt
 
-    def test_contains_all_rules(self):
+    def test_includes_json_example(self):
         prompt = build_speaker_correction_prompt("test")
-        assert "conversational flow" in prompt.lower() or "conversational context" in prompt.lower()
-        assert "keep the original label" in prompt.lower()
+        assert '"old_speaker"' in prompt
+        assert '"new_speaker"' in prompt
+        assert '"line"' in prompt
 
     def test_includes_transcript(self):
         transcript = "<speaker:SPEAKER_00> Hello\n<speaker:SPEAKER_01> World"
@@ -210,14 +210,14 @@ class TestBuildSpeakerCorrectionPrompt:
         assert "<|im_end|>" in prompt
         assert "<|im_start|>assistant" in prompt
 
-    def test_includes_line_count(self):
-        transcript = "<speaker:SPEAKER_00> Hello\n<speaker:SPEAKER_01> World"
-        prompt = build_speaker_correction_prompt(transcript)
-        assert "EXACTLY 2 lines" in prompt
-
     def test_includes_few_shot_example(self):
         prompt = build_speaker_correction_prompt("test")
-        assert "Example input:" in prompt or "Example output:" in prompt
+        assert "Example input:" in prompt
+        assert "Example output:" in prompt
+
+    def test_includes_think_block(self):
+        prompt = build_speaker_correction_prompt("test")
+        assert "<think>\n</think>" in prompt
 
 
 class TestBuildTextCorrectionPrompt:
@@ -400,6 +400,55 @@ class TestApplyTextCorrections:
         corrections = [{"line": "zero", "original": "hello", "corrected": "hi"}]
         result, warnings = apply_text_corrections(segments, corrections)
         assert result[0]["text"] == "hello"
+        assert len(warnings) == 1
+
+
+class TestApplySpeakerCorrections:
+    """Test apply_speaker_corrections."""
+
+    def test_applies_valid_correction(self):
+        segments = [
+            {"speaker": "SPEAKER_00", "text": "Hello", "start": 0.0, "end": 1.0},
+            {"speaker": "SPEAKER_01", "text": "World", "start": 1.0, "end": 2.0},
+        ]
+        corrections = [{"line": 0, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}]
+        result, warnings = apply_speaker_corrections(segments, corrections)
+        assert result[0]["speaker"] == "SPEAKER_01"
+        assert result[0]["start"] == 0.0  # metadata preserved
+        assert result[1]["speaker"] == "SPEAKER_01"  # unchanged
+        assert warnings == []
+
+    def test_skips_speaker_mismatch(self):
+        segments = [{"speaker": "SPEAKER_00", "text": "Hello"}]
+        corrections = [{"line": 0, "old_speaker": "SPEAKER_99", "new_speaker": "SPEAKER_01"}]
+        result, warnings = apply_speaker_corrections(segments, corrections)
+        assert result[0]["speaker"] == "SPEAKER_00"
+        assert len(warnings) == 1
+
+    def test_skips_invalid_line(self):
+        segments = [{"speaker": "SPEAKER_00", "text": "Hello"}]
+        corrections = [{"line": 5, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}]
+        result, warnings = apply_speaker_corrections(segments, corrections)
+        assert result[0]["speaker"] == "SPEAKER_00"
+        assert len(warnings) == 1
+
+    def test_empty_corrections(self):
+        segments = [{"speaker": "SPEAKER_00", "text": "Hello"}]
+        result, warnings = apply_speaker_corrections(segments, [])
+        assert result[0]["speaker"] == "SPEAKER_00"
+        assert warnings == []
+
+    def test_does_not_mutate_original(self):
+        segments = [{"speaker": "SPEAKER_00", "text": "Hello"}]
+        corrections = [{"line": 0, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}]
+        apply_speaker_corrections(segments, corrections)
+        assert segments[0]["speaker"] == "SPEAKER_00"
+
+    def test_missing_speaker_fields(self):
+        segments = [{"speaker": "SPEAKER_00", "text": "Hello"}]
+        corrections = [{"line": 0}]
+        result, warnings = apply_speaker_corrections(segments, corrections)
+        assert result[0]["speaker"] == "SPEAKER_00"
         assert len(warnings) == 1
 
 
@@ -602,8 +651,9 @@ class TestRunLLMPostprocess:
     def test_calls_load_and_unload(self, simple_segments, llm_config):
         backend = MockLLMBackend(
             responses=[
-                # speaker correction response (same words, swapped speakers)
-                "<speaker:SPEAKER_01> Hello world\n<speaker:SPEAKER_00> Hi there",
+                # speaker correction response (JSON, swap speakers)
+                '[{"line": 0, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}, '
+                '{"line": 1, "old_speaker": "SPEAKER_01", "new_speaker": "SPEAKER_00"}]',
                 # text correction response (JSON, no errors)
                 "[]",
             ]
@@ -615,8 +665,9 @@ class TestRunLLMPostprocess:
     def test_runs_all_enabled_tasks(self, simple_segments, llm_config):
         backend = MockLLMBackend(
             responses=[
-                # speaker correction
-                "<speaker:SPEAKER_01> Hello world\n<speaker:SPEAKER_00> Hi there",
+                # speaker correction (JSON, swap speakers)
+                '[{"line": 0, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}, '
+                '{"line": 1, "old_speaker": "SPEAKER_01", "new_speaker": "SPEAKER_00"}]',
                 # text correction (JSON, no errors)
                 "[]",
             ]
@@ -640,7 +691,8 @@ class TestRunLLMPostprocess:
 
         backend = MockLLMBackend(
             responses=[
-                "<speaker:SPEAKER_01> Hello world\n<speaker:SPEAKER_00> Hi there",
+                '[{"line": 0, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}, '
+                '{"line": 1, "old_speaker": "SPEAKER_01", "new_speaker": "SPEAKER_00"}]',
             ]
         )
         result = run_llm_postprocess(simple_segments, llm_config, backend=backend)
@@ -650,22 +702,20 @@ class TestRunLLMPostprocess:
         assert result["segments"][0]["speaker"] == "SPEAKER_01"
         assert result["segments"][1]["speaker"] == "SPEAKER_00"
 
-    def test_tpst_fallback_on_hallucination(self, simple_segments, llm_config):
-        """When the LLM hallucinates new words, TPST should revert to originals."""
+    def test_speaker_correction_invalid_old_speaker(self, simple_segments, llm_config):
+        """When the LLM references a wrong old_speaker, the correction is skipped."""
         llm_config["llm"]["tasks"]["text_correction"] = False
 
-        # LLM adds a word ("beautiful") — this should be caught
         backend = MockLLMBackend(
             responses=[
-                "<speaker:SPEAKER_00> Hello beautiful world\n<speaker:SPEAKER_01> Hi there",
+                '[{"line": 0, "old_speaker": "SPEAKER_99", "new_speaker": "SPEAKER_01"}]',
             ]
         )
         result = run_llm_postprocess(simple_segments, llm_config, backend=backend)
 
-        # Should fall back to original
-        assert result["segments"] == simple_segments
+        # Speaker should remain unchanged
+        assert result["segments"][0]["speaker"] == "SPEAKER_00"
         assert len(result["warnings"]) > 0
-        assert any("TPST" in w for w in result["warnings"])
 
     def test_unload_called_even_on_error(self, simple_segments, llm_config):
         """Backend.unload() must be called even if generation raises."""
@@ -707,19 +757,17 @@ class TestRunLLMPostprocess:
         """Full pipeline with code-switched content, only speaker correction enabled."""
         llm_config["llm"]["tasks"]["text_correction"] = False
 
-        # Swap speakers for first two segments (words stay the same)
+        # Swap speaker for first segment
         backend = MockLLMBackend(
             responses=[
-                "<speaker:SPEAKER_01> 今天我们来讨论 project timeline\n"
-                "<speaker:SPEAKER_00> OK let me pull up the schedule\n"
-                "<speaker:SPEAKER_00> 我觉得 deadline 可以往后推一周",
+                '[{"line": 0, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}]',
             ]
         )
         result = run_llm_postprocess(chinese_english_segments, llm_config, backend=backend)
 
         assert result["warnings"] == []
         assert result["segments"][0]["speaker"] == "SPEAKER_01"
-        assert result["segments"][1]["speaker"] == "SPEAKER_00"
+        assert result["segments"][1]["speaker"] == "SPEAKER_01"  # unchanged
 
     def test_text_correction_json_output(self, llm_config):
         """Verify JSON correction is applied to segment text."""

@@ -269,6 +269,48 @@ def validate_text_correction(segment_text: str, correction: dict) -> tuple[bool,
 _MAX_CORRECTIONS_PER_CHUNK = 20
 
 
+def apply_speaker_corrections(
+    segments: list[dict],
+    corrections: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Apply JSON speaker corrections to segments.
+
+    Each correction must specify the expected old_speaker to prevent
+    misapplication if the LLM output is stale or misaligned.
+
+    Args:
+        segments: Original transcript segments.
+        corrections: List of ``{"line", "old_speaker", "new_speaker"}`` dicts.
+
+    Returns:
+        ``(corrected_segments, warnings)``
+    """
+    warnings: list[str] = []
+    result = [dict(s) for s in segments]
+    applied = 0
+    for corr in corrections:
+        line = corr.get("line")
+        if not isinstance(line, int) or line < 0 or line >= len(result):
+            warnings.append(f"Invalid line {line!r}, skipping speaker correction")
+            continue
+        old_speaker = corr.get("old_speaker", "")
+        new_speaker = corr.get("new_speaker", "")
+        if not old_speaker or not new_speaker:
+            warnings.append(f"Line {line}: missing speaker field, skipping")
+            continue
+        if result[line]["speaker"] != old_speaker:
+            warnings.append(
+                f"Line {line}: expected speaker '{old_speaker}', "
+                f"got '{result[line]['speaker']}', skipping"
+            )
+            continue
+        result[line]["speaker"] = new_speaker
+        applied += 1
+    if applied:
+        logger.info("Applied %d speaker correction(s)", applied)
+    return result, warnings
+
+
 def apply_text_corrections(
     segments: list[dict],
     corrections: list[dict],
@@ -368,23 +410,24 @@ def parse_diarization_lm(text: str) -> list[dict]:
 
 
 def build_speaker_correction_prompt(transcript: str) -> str:
-    """Build prompt for speaker label correction task.
+    """Build prompt for speaker label correction with JSON output.
 
-    Instructs the LLM to only change ``<speaker:XX>`` tags and never touch the
-    transcribed words.  Template follows the DiarizationLM approach.
-    Uses Qwen ChatML format for reliable instruction following.
+    Instructs the LLM to output a JSON array of speaker label corrections
+    instead of reproducing the entire transcript.
 
     Args:
         transcript: Transcript in DiarizationLM text format.
 
     Returns:
-        Full prompt string ready for LLM generation.
+        Full ChatML prompt string ready for LLM generation.
     """
-    n_lines = len(transcript.strip().splitlines())
     return (
         "<|im_start|>system\n"
-        "You correct speaker labels in diarized transcripts. "
-        "You MUST output every line verbatim, only changing <speaker:XX> tags.\n"
+        "You fix speaker labels in diarized transcripts.\n"
+        "Output ONLY a JSON array of corrections. If no corrections needed, output [].\n"
+        "Each correction: "
+        '{"line": N, "old_speaker": "SPEAKER_XX", "new_speaker": "SPEAKER_YY"}\n'
+        "where N is the 0-indexed line number.\n"
         "<|im_end|>\n"
         "<|im_start|>user\n"
         "Example input:\n"
@@ -393,14 +436,12 @@ def build_speaker_correction_prompt(transcript: str) -> str:
         "<speaker:SPEAKER_00> 小红你好，今天讨论什么？\n"
         "\n"
         "Example output:\n"
-        "<speaker:SPEAKER_00> 你好，我是小明。\n"
-        "<speaker:SPEAKER_01> 你好小明，我叫小红。\n"
-        "<speaker:SPEAKER_00> 小红你好，今天讨论什么？\n"
+        '[{"line": 1, "old_speaker": "SPEAKER_00", "new_speaker": "SPEAKER_01"}]\n'
         "\n"
-        f"Now correct this transcript. Output EXACTLY {n_lines} lines. "
-        "Copy every word verbatim — only change <speaker:XX> tags where the speaker "
-        "attribution is clearly wrong based on conversational context. "
-        "If unsure, keep the original label.\n"
+        "Now correct speaker labels in this transcript. "
+        "Only change labels where speaker attribution is clearly wrong "
+        "based on conversational context. If unsure, keep the original label. "
+        "If no corrections needed, output [].\n"
         "\n"
         f"{transcript}\n"
         "<|im_end|>\n"
@@ -608,20 +649,12 @@ def _chunk_segments(segments: list[dict], max_segments_per_chunk: int) -> list[l
     return chunks
 
 
-def _process_diarization_output(
+def _process_json_speaker_output(
     original_chunk: list[dict], raw_output: str
 ) -> tuple[list[dict], list[str]]:
-    """Process DiarizationLM-format output with TPST check (speaker correction)."""
-    corrected = parse_diarization_lm(raw_output)
-    corrected, warnings = tpst_check(original_chunk, corrected)
-    merged = []
-    for j, orig in enumerate(original_chunk):
-        entry = dict(orig)
-        if j < len(corrected):
-            entry["speaker"] = corrected[j].get("speaker", orig.get("speaker"))
-            entry["text"] = corrected[j].get("text", orig.get("text", ""))
-        merged.append(entry)
-    return merged, warnings
+    """Process JSON speaker corrections output."""
+    corrections = parse_json_corrections(raw_output)
+    return apply_speaker_corrections(original_chunk, corrections)
 
 
 def _process_json_text_output(
@@ -765,7 +798,8 @@ def run_llm_postprocess(
                 build_speaker_correction_prompt,
                 backend,
                 n_ctx,
-                output_processor=_process_diarization_output,
+                output_processor=_process_json_speaker_output,
+                max_output_tokens=1024,
             )
             all_warnings.extend(warnings)
 
