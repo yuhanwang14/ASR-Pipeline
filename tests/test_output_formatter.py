@@ -106,7 +106,6 @@ class TestToJson:
         assert "\\u" not in output
 
 
-
 class TestToSrt:
     """Tests for to_srt()."""
 
