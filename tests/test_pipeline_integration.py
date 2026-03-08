@@ -61,7 +61,6 @@ def mock_config(tmp_path):
             "tasks": {
                 "speaker_correction": True,
                 "text_correction": True,
-                "summarization": True,
             },
         },
         "output": {
@@ -103,7 +102,6 @@ def sample_llm_result(sample_segments):
     """Return value for mocked run_llm_postprocess."""
     return {
         "segments": sample_segments,
-        "summary": "Test meeting summary.",
         "warnings": [],
     }
 
@@ -161,11 +159,9 @@ class TestFullPipeline:
         assert "transcription" in result["stages"]
         assert "llm_postprocess" in result["stages"]
 
-        # Final segments and summary are exposed at top level
+        # Final segments are exposed at top level
         assert "segments" in result
         assert len(result["segments"]) == 2
-        assert "summary" in result
-        assert result["summary"] == "Test meeting summary."
 
         # Timing metadata is present
         assert "timings" in result
@@ -377,7 +373,6 @@ class TestFullPipeline:
                 "llm_postprocess": sample_llm_result,
             },
             "segments": sample_segments,
-            "summary": "Test summary.",
             "warnings": [],
             "timings": {"audio_load": 0.1, "stage_0": 0.2},
             "total_time_seconds": 0.3,

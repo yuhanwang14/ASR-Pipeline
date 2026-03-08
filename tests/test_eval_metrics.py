@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from src.eval_metrics import (
     compute_cer,
     compute_cpwer,
@@ -15,7 +13,6 @@ from src.eval_metrics import (
 
 
 class TestParseReferenceTranscript:
-
     def test_basic_parsing(self):
         md = (
             "**Transcript**\n\n"
@@ -30,11 +27,7 @@ class TestParseReferenceTranscript:
         assert segments[2] == {"speaker": "Speaker 1", "text": "对。"}
 
     def test_skips_timestamp_markers(self):
-        md = (
-            "**Speaker 1:** Hello.\n\n"
-            "(3:00)\n"
-            "**Speaker 2:** World.\n"
-        )
+        md = "**Speaker 1:** Hello.\n\n(3:00)\n**Speaker 2:** World.\n"
         segments = parse_reference_transcript(md)
         assert len(segments) == 2
 
@@ -50,7 +43,6 @@ class TestParseReferenceTranscript:
 
 
 class TestLoadPipelineOutput:
-
     def test_loads_segments(self, tmp_path):
         data = {
             "segments": [
@@ -92,7 +84,6 @@ class TestLoadPipelineOutput:
 
 
 class TestNormalizeForEval:
-
     def test_strips_punctuation(self):
         assert normalize_for_eval("Hello, world!") == "hello world"
 
@@ -112,7 +103,6 @@ class TestNormalizeForEval:
 
 
 class TestComputeCer:
-
     def test_identical(self):
         assert compute_cer("hello", "hello") == 0.0
 
@@ -132,7 +122,6 @@ class TestComputeCer:
 
 
 class TestComputeWer:
-
     def test_identical(self):
         assert compute_wer("hello world", "hello world") == 0.0
 
@@ -150,7 +139,6 @@ class TestComputeWer:
 
 
 class TestComputeCpwer:
-
     def test_identical_text_different_labels(self):
         ref = [{"speaker": "A", "text": "hello"}, {"speaker": "B", "text": "world"}]
         hyp = [{"speaker": "X", "text": "hello"}, {"speaker": "Y", "text": "world"}]

@@ -41,7 +41,8 @@ def load_pipeline_output(path: str | Path) -> list[dict]:
         data = json.load(f)
     segments = data.get("segments", [])
     return [
-        s for s in segments
+        s
+        for s in segments
         if s.get("text", "").strip() and not s.get("text", "").startswith("<think>")
     ]
 

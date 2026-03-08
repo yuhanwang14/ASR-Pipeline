@@ -174,12 +174,11 @@ def gpu_config(tmp_path) -> dict:
             "model_id": "Qwen/Qwen3.5-9B",
             "gguf_url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF",
             "backend": "llama-cpp",
-            "n_ctx": 8192,
+            "n_ctx": 16384,
             "n_gpu_layers": -1,
             "tasks": {
                 "speaker_correction": True,
                 "text_correction": True,
-                "summarization": False,  # Skip summarization to save time
             },
         },
         "output": {

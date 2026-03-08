@@ -65,7 +65,8 @@ def main():
             config["output"]["output_dir"] = args.output_dir
         result = run_pipeline(args.audio_file, config=config)
         hyp_segments = [
-            s for s in result["segments"]
+            s
+            for s in result["segments"]
             if s.get("text", "").strip() and not s.get("text", "").startswith("<think>")
         ]
         src_label = args.audio_file
@@ -88,7 +89,9 @@ def main():
     hyp_speakers = sorted(set(s["speaker"] for s in hyp_segments))
 
     print("=== ASR Pipeline Evaluation ===")
-    print(f"Reference:  {args.reference} ({len(ref_speakers)} speakers, {len(ref_segments)} segments)")
+    print(
+        f"Reference:  {args.reference} ({len(ref_speakers)} speakers, {len(ref_segments)} segments)"
+    )
     print(f"Hypothesis: {src_label} ({len(hyp_speakers)} speakers, {len(hyp_segments)} segments)")
     print()
     print("Text Quality (speaker-agnostic):")

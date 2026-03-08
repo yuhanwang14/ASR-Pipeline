@@ -39,7 +39,6 @@ def to_json(result: dict, metadata: dict) -> str:
         },
         "speakers": [{"id": str, "name": str|null, "confidence": float|null}],
         "segments": [{"start": float, "end": float, "speaker": str, "text": str}],
-        "summary": str|null
     }
 
     Args:
@@ -86,7 +85,6 @@ def to_json(result: dict, metadata: dict) -> str:
             }
             for seg in segments
         ],
-        "summary": result.get("summary"),
     }
 
     return json.dumps(output, indent=2, ensure_ascii=False)
