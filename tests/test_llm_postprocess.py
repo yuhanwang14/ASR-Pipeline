@@ -528,7 +528,7 @@ class TestRunLLMPostprocess:
             def load(self):
                 self.loaded = True
 
-            def generate(self, prompt):
+            def generate(self, prompt, max_tokens=None):
                 raise RuntimeError("GPU OOM")
 
             def unload(self):

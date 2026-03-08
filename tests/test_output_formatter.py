@@ -39,7 +39,6 @@ SAMPLE_RESULT = {
     "segments": SAMPLE_SEGMENTS,
     "audio_duration_seconds": 10.0,
     "total_time_seconds": 2.5,
-    "summary": "讨论了项目时间线调整。",
 }
 
 SAMPLE_METADATA = {
@@ -66,8 +65,6 @@ class TestToJson:
         assert "metadata" in parsed
         assert "speakers" in parsed
         assert "segments" in parsed
-        assert "summary" in parsed
-
         meta = parsed["metadata"]
         assert meta["audio_file"] == "meeting.wav"
         assert meta["duration_seconds"] == 10.0
@@ -108,18 +105,6 @@ class TestToJson:
         assert "今天" in output
         assert "\\u" not in output
 
-    def test_summary_included(self):
-        """to_json includes summary when present."""
-        output = to_json(SAMPLE_RESULT, SAMPLE_METADATA)
-        parsed = json.loads(output)
-        assert parsed["summary"] == "讨论了项目时间线调整。"
-
-    def test_summary_null_when_absent(self):
-        """to_json sets summary to null when not in result."""
-        result = {"segments": SAMPLE_SEGMENTS}
-        output = to_json(result, SAMPLE_METADATA)
-        parsed = json.loads(output)
-        assert parsed["summary"] is None
 
 
 class TestToSrt:
