@@ -59,6 +59,15 @@ def main():
 
         output_dir = config["output"]["output_dir"]
 
+        # Clear cached stage files unless --resume is set
+        if not args.resume:
+            from pathlib import Path
+
+            out_path = Path(output_dir)
+            if out_path.exists():
+                for stage_file in out_path.glob("stage_*.json"):
+                    stage_file.unlink()
+
         result = run_pipeline(args.audio_file, config=config, output_dir=output_dir)
         saved = save_outputs(result, config, args.audio_file)
 

@@ -4,12 +4,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import torch
-
 
 def _serialize_value(value: Any) -> Any:
     """Convert non-JSON-serializable types to JSON-compatible types."""
+    import numpy as np
+    import torch
+
     if isinstance(value, (int, str, float, bool, type(None))):
         return value
     if isinstance(value, np.ndarray):

@@ -19,7 +19,7 @@ import torch
 CUDA_AVAILABLE = torch.cuda.is_available()
 HF_TOKEN = os.environ.get("HF_TOKEN")
 GGUF_PATH = Path(__file__).resolve().parent.parent / "models" / "Qwen3.5-9B-Q4_K_M.gguf"
-TEST_AUDIO = Path(__file__).resolve().parent / "fixtures" / "Zoom - Feb 27.wav"
+TEST_AUDIO = Path(__file__).resolve().parent / "fixtures" / "Zoom - Mar 7.m4a"
 
 requires_cuda = pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA GPU not available")
 requires_hf_token = pytest.mark.skipif(not HF_TOKEN, reason="HF_TOKEN env var not set")

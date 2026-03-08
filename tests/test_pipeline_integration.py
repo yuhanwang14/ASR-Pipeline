@@ -83,18 +83,19 @@ def sample_segments():
 
 @pytest.fixture
 def sample_vad_result():
-    """Return value for mocked run_vad."""
-    clean_waveform = torch.randn(1, 16000)
-    timestamp_map = [
-        {
-            "original_start": 0.0,
-            "original_end": 2.0,
-            "clean_start": 0.0,
-            "clean_end": 2.0,
-        }
-    ]
-    speech_segments = [{"start": 0.0, "end": 2.0}]
-    return clean_waveform, timestamp_map, speech_segments
+    """Stage 0 result dict as returned by _run_stage_0."""
+    return {
+        "speech_segments": [{"start": 0.0, "end": 2.0}],
+        "timestamp_map": [
+            {
+                "original_start": 0.0,
+                "original_end": 2.0,
+                "clean_start": 0.0,
+                "clean_end": 2.0,
+            }
+        ],
+        "clean_waveform_samples": 32000,
+    }
 
 
 @pytest.fixture
@@ -104,30 +105,6 @@ def sample_llm_result(sample_segments):
         "segments": sample_segments,
         "summary": "Test meeting summary.",
         "warnings": [],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Helpers: build the set of patches for all backends
-# ---------------------------------------------------------------------------
-
-
-def _build_pipeline_patches(
-    sample_vad_result,
-    sample_segments,
-    sample_llm_result,
-):
-    """Return a dict of mock targets -> return values for all pipeline stages."""
-    return {
-        "src.pipeline.load_audio": MagicMock(return_value=(torch.randn(1, 32000), 16000)),
-        "src.pipeline.get_vram_usage": MagicMock(return_value=0.0),
-        "src.vad.run_vad": MagicMock(return_value=sample_vad_result),
-        "src.diarization.run_diarization": MagicMock(return_value=sample_segments),
-        "src.speaker_registry.match_speakers": MagicMock(return_value=sample_segments),
-        "src.transcription.run_transcription": MagicMock(return_value=sample_segments),
-        "src.llm_postprocess.run_llm_postprocess": MagicMock(return_value=sample_llm_result),
-        "src.gpu_utils.check_vram_available": MagicMock(),
-        "src.gpu_utils.gpu_stage": MagicMock(),
     }
 
 
@@ -154,28 +131,16 @@ class TestFullPipeline:
         output_dir = str(tmp_path / "output")
         mock_config["output"]["output_dir"] = output_dir
 
-        patches = _build_pipeline_patches(sample_vad_result, sample_segments, sample_llm_result)
-
         with (
-            patch("src.pipeline.load_audio", patches["src.pipeline.load_audio"]),
             patch(
-                "src.pipeline.get_vram_usage",
-                patches["src.pipeline.get_vram_usage"],
+                "src.audio_preprocessing.load_audio",
+                return_value=(torch.randn(1, 32000), 16000),
             ),
+            patch("src.gpu_utils.get_vram_usage", return_value=0.0),
+            patch("src.pipeline._run_stage_0", return_value=sample_vad_result),
             patch(
-                "src.pipeline._run_stage_0",
-                return_value={
-                    "speech_segments": [{"start": 0.0, "end": 2.0}],
-                    "timestamp_map": [
-                        {
-                            "original_start": 0.0,
-                            "original_end": 2.0,
-                            "clean_start": 0.0,
-                            "clean_end": 2.0,
-                        }
-                    ],
-                    "clean_waveform_samples": 16000,
-                },
+                "src.pipeline._build_clean_waveform",
+                return_value=torch.randn(1, 32000),
             ),
             patch(
                 "src.pipeline._run_stage_1",
@@ -185,10 +150,7 @@ class TestFullPipeline:
                 "src.pipeline._run_stage_2",
                 return_value={"segments": sample_segments},
             ),
-            patch(
-                "src.pipeline._run_stage_3",
-                return_value=sample_llm_result,
-            ),
+            patch("src.pipeline._run_stage_3", return_value=sample_llm_result),
         ):
             result = run_pipeline(mock_audio_file, config=mock_config, output_dir=output_dir)
 
@@ -222,6 +184,7 @@ class TestFullPipeline:
         tmp_path,
         mock_audio_file,
         mock_config,
+        sample_vad_result,
         sample_segments,
         sample_llm_result,
     ):
@@ -233,18 +196,7 @@ class TestFullPipeline:
         mock_config["output"]["output_dir"] = str(output_dir)
 
         # Pre-save stage 0 and stage 1 intermediates
-        stage_0_data = {
-            "speech_segments": [{"start": 0.0, "end": 2.0}],
-            "timestamp_map": [
-                {
-                    "original_start": 0.0,
-                    "original_end": 2.0,
-                    "clean_start": 0.0,
-                    "clean_end": 2.0,
-                }
-            ],
-            "clean_waveform_samples": 16000,
-        }
+        stage_0_data = sample_vad_result
         stage_1_data = {"segments": sample_segments}
 
         (output_dir / "stage_0.json").write_text(json.dumps(stage_0_data), encoding="utf-8")
@@ -258,11 +210,15 @@ class TestFullPipeline:
 
         with (
             patch(
-                "src.pipeline.load_audio",
+                "src.audio_preprocessing.load_audio",
                 return_value=(torch.randn(1, 32000), 16000),
             ),
-            patch("src.pipeline.get_vram_usage", return_value=0.0),
+            patch("src.gpu_utils.get_vram_usage", return_value=0.0),
             patch("src.pipeline._run_stage_0", stage_0_mock),
+            patch(
+                "src.pipeline._build_clean_waveform",
+                return_value=torch.randn(1, 32000),
+            ),
             patch("src.pipeline._run_stage_1", stage_1_mock),
             patch("src.pipeline._run_stage_2", stage_2_mock),
             patch("src.pipeline._run_stage_3", stage_3_mock),
@@ -284,6 +240,117 @@ class TestFullPipeline:
         # Cached data should appear in result
         assert result["stages"]["vad"] == stage_0_data
         assert result["stages"]["diarization"] == stage_1_data
+
+    def test_stage_1_receives_clean_waveform_and_remaps(
+        self,
+        tmp_path,
+        mock_audio_file,
+        mock_config,
+        sample_segments,
+        sample_llm_result,
+    ):
+        """Verify that Stage 1 is called with clean waveform and timestamp_map."""
+        from src.pipeline import run_pipeline
+
+        output_dir = str(tmp_path / "output")
+        mock_config["output"]["output_dir"] = output_dir
+
+        stage_0_result = {
+            "speech_segments": [{"start": 1.0, "end": 3.0}],
+            "timestamp_map": [
+                {
+                    "original_start": 1.0,
+                    "original_end": 3.0,
+                    "clean_start": 0.0,
+                    "clean_end": 2.0,
+                }
+            ],
+            "clean_waveform_samples": 32000,
+        }
+
+        stage_1_mock = MagicMock(return_value={"segments": sample_segments})
+        clean_wf = torch.randn(1, 32000)
+
+        with (
+            patch(
+                "src.audio_preprocessing.load_audio",
+                return_value=(torch.randn(1, 48000), 16000),
+            ),
+            patch("src.gpu_utils.get_vram_usage", return_value=0.0),
+            patch("src.pipeline._run_stage_0", return_value=stage_0_result),
+            patch("src.pipeline._build_clean_waveform", return_value=clean_wf),
+            patch("src.pipeline._run_stage_1", stage_1_mock),
+            patch(
+                "src.pipeline._run_stage_2",
+                return_value={"segments": sample_segments},
+            ),
+            patch("src.pipeline._run_stage_3", return_value=sample_llm_result),
+        ):
+            run_pipeline(mock_audio_file, config=mock_config, output_dir=output_dir)
+
+        # Stage 1 should receive clean_waveform and timestamp_map
+        call_args = stage_1_mock.call_args
+        assert torch.equal(call_args[0][0], clean_wf)
+        assert call_args[0][1] == 16000
+        assert call_args[0][3] == stage_0_result["timestamp_map"]
+
+    def test_stage_2_receives_segments_directly(
+        self,
+        tmp_path,
+        mock_audio_file,
+        mock_config,
+        sample_segments,
+        sample_llm_result,
+    ):
+        """Verify that Stage 2 receives segments from Stage 1 directly (not from disk)."""
+        from src.pipeline import run_pipeline
+
+        output_dir = str(tmp_path / "output")
+        mock_config["output"]["output_dir"] = output_dir
+
+        stage_0_result = {
+            "speech_segments": [{"start": 0.0, "end": 2.0}],
+            "timestamp_map": [
+                {
+                    "original_start": 0.0,
+                    "original_end": 2.0,
+                    "clean_start": 0.0,
+                    "clean_end": 2.0,
+                }
+            ],
+            "clean_waveform_samples": 32000,
+        }
+
+        stage_1_segments = [
+            {"start": 0.0, "end": 1.0, "speaker": "A"},
+            {"start": 1.0, "end": 2.0, "speaker": "B"},
+        ]
+
+        stage_2_mock = MagicMock(return_value={"segments": sample_segments})
+
+        with (
+            patch(
+                "src.audio_preprocessing.load_audio",
+                return_value=(torch.randn(1, 32000), 16000),
+            ),
+            patch("src.gpu_utils.get_vram_usage", return_value=0.0),
+            patch("src.pipeline._run_stage_0", return_value=stage_0_result),
+            patch(
+                "src.pipeline._build_clean_waveform",
+                return_value=torch.randn(1, 32000),
+            ),
+            patch(
+                "src.pipeline._run_stage_1",
+                return_value={"segments": stage_1_segments},
+            ),
+            patch("src.pipeline._run_stage_2", stage_2_mock),
+            patch("src.pipeline._run_stage_3", return_value=sample_llm_result),
+        ):
+            run_pipeline(mock_audio_file, config=mock_config, output_dir=output_dir)
+
+        # Stage 2 should receive segments directly from stage 1, not from disk
+        call_args = stage_2_mock.call_args
+        assert call_args[0][2] == stage_1_segments
 
     def test_pipeline_produces_all_output_formats(
         self,

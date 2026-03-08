@@ -68,9 +68,11 @@ def enroll_speaker(name: str, audio_paths: list[str], config: dict) -> None:
     logger.info("Saved speaker profile for '%s' to %s", name, save_path)
 
     # Clean up
-    from src.gpu_utils import unload_model
+    from src.gpu_utils import force_gpu_cleanup
 
-    unload_model(model)
+    del model
+    del inference
+    force_gpu_cleanup()
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

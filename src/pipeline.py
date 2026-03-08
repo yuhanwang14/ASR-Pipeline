@@ -5,12 +5,28 @@ import time
 from pathlib import Path
 from typing import Any
 
-from src.audio_preprocessing import load_audio
 from src.config import load_config
-from src.gpu_utils import get_vram_usage
 from src.intermediate import get_completed_stages, load_stage_result, save_stage_result
 
 logger = logging.getLogger("asr_pipeline")
+
+
+def _build_clean_waveform(waveform, sample_rate: int, speech_segments: list[dict]):
+    """Reconstruct clean waveform by concatenating speech segments from original audio.
+
+    This is used both after a fresh Stage 0 run and when resuming from cache
+    (where the clean waveform tensor is not persisted).
+    """
+    import torch
+
+    parts = []
+    for seg in speech_segments:
+        start_sample = int(seg["start"] * sample_rate)
+        end_sample = int(seg["end"] * sample_rate)
+        parts.append(waveform[:, start_sample:end_sample])
+    if parts:
+        return torch.cat(parts, dim=1)
+    return torch.zeros(1, 0, dtype=waveform.dtype)
 
 
 def run_pipeline(
@@ -21,9 +37,9 @@ def run_pipeline(
 
     Flow:
     1. Load and preprocess audio
-    2. Stage 0: VAD (silence removal)
-    3. Stage 1: Diarization (speaker identification)
-    4. Stage 2: ASR (speech-to-text)
+    2. Stage 0: VAD (silence removal) → clean waveform + timestamp map
+    3. Stage 1: Diarization on clean waveform → remap to original time
+    4. Stage 2: ASR on original waveform using remapped segments
     5. Stage 3: LLM post-processing (error correction, summarization)
     6. Format and save output
 
@@ -39,6 +55,9 @@ def run_pipeline(
         FileNotFoundError: If audio file not found
         RuntimeError: If any stage fails
     """
+    from src.audio_preprocessing import load_audio
+    from src.gpu_utils import get_vram_usage
+
     if config is None:
         config = load_config()
 
@@ -57,7 +76,7 @@ def run_pipeline(
     logger.info(f"Completed stages: {completed}")
 
     try:
-        # Load audio (always done)
+        # Load audio (always done — needed for waveform slicing even on resume)
         logger.info("Loading audio...")
         vram_before = get_vram_usage()
         t0 = time.perf_counter()
@@ -87,12 +106,19 @@ def run_pipeline(
 
         pipeline_result["stages"]["vad"] = stage_0_result
 
-        # Stage 1: Diarization
+        # Build clean waveform from VAD speech segments (cheap CPU concat)
+        clean_waveform = _build_clean_waveform(
+            waveform, sample_rate, stage_0_result["speech_segments"]
+        )
+
+        # Stage 1: Diarization (on clean waveform, then remap to original time)
         if "stage_1" not in completed:
             logger.info("Running Stage 1: Speaker Diarization...")
             vram_before = get_vram_usage()
             t0 = time.perf_counter()
-            stage_1_result = _run_stage_1(waveform, sample_rate, config)
+            stage_1_result = _run_stage_1(
+                clean_waveform, sample_rate, config, stage_0_result["timestamp_map"]
+            )
             timings["stage_1"] = time.perf_counter() - t0
             vram_after = get_vram_usage()
             logger.info(
@@ -105,12 +131,12 @@ def run_pipeline(
 
         pipeline_result["stages"]["diarization"] = stage_1_result
 
-        # Stage 2: ASR
+        # Stage 2: ASR (on original waveform, using remapped segments)
         if "stage_2" not in completed:
             logger.info("Running Stage 2: Speech-to-Text...")
             vram_before = get_vram_usage()
             t0 = time.perf_counter()
-            stage_2_result = _run_stage_2(waveform, sample_rate, config)
+            stage_2_result = _run_stage_2(waveform, sample_rate, stage_1_result["segments"], config)
             timings["stage_2"] = time.perf_counter() - t0
             vram_after = get_vram_usage()
             logger.info(
@@ -168,14 +194,24 @@ def _run_stage_0(waveform, sample_rate: int, config: dict) -> dict[str, Any]:
     }
 
 
-def _run_stage_1(waveform, sample_rate: int, config: dict) -> dict[str, Any]:
-    """Stage 1: Speaker Diarization."""
+def _run_stage_1(
+    clean_waveform, sample_rate: int, config: dict, timestamp_map: list[dict]
+) -> dict[str, Any]:
+    """Stage 1: Speaker Diarization on clean (silence-removed) waveform.
+
+    After diarization, remaps timestamps from clean-audio time back to
+    original-audio time using the VAD timestamp map.
+    """
     from src.diarization import run_diarization
     from src.gpu_utils import gpu_stage
     from src.speaker_registry import match_speakers
+    from src.timestamp_utils import remap_to_original
 
     with gpu_stage("Diarization", required_mb=1000):
-        segments = run_diarization(waveform, sample_rate, config)
+        segments = run_diarization(clean_waveform, sample_rate, config)
+
+    # Remap clean-audio timestamps back to original-audio timestamps
+    segments = remap_to_original(segments, timestamp_map)
 
     # Match speakers against enrolled profiles
     segments = match_speakers(segments, config)
@@ -183,14 +219,13 @@ def _run_stage_1(waveform, sample_rate: int, config: dict) -> dict[str, Any]:
     return {"segments": segments}
 
 
-def _run_stage_2(waveform, sample_rate: int, config: dict) -> dict[str, Any]:
-    """Stage 2: Speech-to-Text Transcription."""
+def _run_stage_2(waveform, sample_rate: int, segments: list[dict], config: dict) -> dict[str, Any]:
+    """Stage 2: Speech-to-Text Transcription.
+
+    Uses original waveform with segments already remapped to original time.
+    """
     from src.gpu_utils import gpu_stage
     from src.transcription import run_transcription
-
-    # Use diarization segments from stage 1
-    stage_1 = load_stage_result("stage_1", config.get("output", {}).get("output_dir", "output/"))
-    segments = stage_1["segments"] if stage_1 else []
 
     with gpu_stage("ASR", required_mb=1500):
         transcript_segments = run_transcription(waveform, sample_rate, segments, config)

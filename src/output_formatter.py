@@ -17,10 +17,12 @@ def _format_srt_time(seconds: float) -> str:
         Formatted SRT timestamp string.
     """
     seconds = max(0.0, seconds)
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = round((seconds % 1) * 1000)
+    total_millis = round(seconds * 1000)
+    millis = total_millis % 1000
+    total_secs = total_millis // 1000
+    secs = total_secs % 60
+    minutes = (total_secs // 60) % 60
+    hours = total_secs // 3600
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
