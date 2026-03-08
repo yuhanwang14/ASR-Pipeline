@@ -4,7 +4,13 @@ import json
 
 import pytest
 
-from src.eval_metrics import load_pipeline_output, parse_reference_transcript
+from src.eval_metrics import (
+    compute_cer,
+    compute_wer,
+    load_pipeline_output,
+    normalize_for_eval,
+    parse_reference_transcript,
+)
 
 
 class TestParseReferenceTranscript:
@@ -82,3 +88,61 @@ class TestLoadPipelineOutput:
         segments = load_pipeline_output(path)
         assert len(segments) == 1
         assert segments[0]["text"] == "real text"
+
+
+class TestNormalizeForEval:
+
+    def test_strips_punctuation(self):
+        assert normalize_for_eval("Hello, world!") == "hello world"
+
+    def test_strips_chinese_punctuation(self):
+        result = normalize_for_eval("嗯，对。")
+        assert "，" not in result
+        assert "。" not in result
+
+    def test_preserves_chinese_characters(self):
+        assert "今" in normalize_for_eval("今天讨论")
+
+    def test_collapses_whitespace(self):
+        assert normalize_for_eval("hello   world") == "hello world"
+
+    def test_strips_ellipsis(self):
+        assert "..." not in normalize_for_eval("就是... 主要的话")
+
+
+class TestComputeCer:
+
+    def test_identical(self):
+        assert compute_cer("hello", "hello") == 0.0
+
+    def test_completely_different(self):
+        assert compute_cer("abc", "xyz") > 0.0
+
+    def test_empty_reference(self):
+        assert compute_cer("", "") == 0.0
+
+    def test_chinese_text(self):
+        cer = compute_cer("今天讨论项目", "今天讨论项目")
+        assert cer == 0.0
+
+    def test_partial_match(self):
+        cer = compute_cer("hello world", "hello earth")
+        assert 0.0 < cer < 1.0
+
+
+class TestComputeWer:
+
+    def test_identical(self):
+        assert compute_wer("hello world", "hello world") == 0.0
+
+    def test_completely_different(self):
+        assert compute_wer("hello", "goodbye") > 0.0
+
+    def test_mixed_chinese_english(self):
+        wer = compute_wer("今天讨论 project", "今天讨论 project")
+        assert wer == 0.0
+
+    def test_chinese_char_substitution(self):
+        # "剧" → "拒" = 1 substitution out of 4 tokens
+        wer = compute_wer("他当时剧的时候", "他当时拒的时候")
+        assert 0.0 < wer < 0.5
