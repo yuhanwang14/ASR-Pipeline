@@ -4,17 +4,16 @@ import gc
 from collections.abc import Generator
 from contextlib import contextmanager
 
-import torch
 
-
-def unload_model(*models) -> None:
+def force_gpu_cleanup() -> None:
     """
-    Forcefully unload PyTorch models from GPU.
+    Force garbage collection and GPU cache clearing.
 
-    Must be called in order: del → gc.collect → empty_cache → synchronize
+    Callers must ``del`` their own model references before calling this.
+    Sequence: caller ``del model`` → ``force_gpu_cleanup()``.
     """
-    for model in models:
-        del model
+    import torch
+
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -23,6 +22,8 @@ def unload_model(*models) -> None:
 
 def get_vram_usage() -> float:
     """Return current VRAM usage in MB."""
+    import torch
+
     if torch.cuda.is_available():
         return torch.cuda.memory_allocated() / 1024 / 1024
     return 0.0
@@ -38,6 +39,8 @@ def check_vram_available(required_mb: float) -> None:
     Raises:
         RuntimeError: If insufficient VRAM
     """
+    import torch
+
     if torch.cuda.is_available():
         total_mem = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
         allocated = torch.cuda.memory_allocated() / 1024 / 1024
@@ -70,6 +73,7 @@ def gpu_stage(stage_name: str, required_mb: float) -> Generator:
     try:
         yield
     finally:
+        force_gpu_cleanup()
         vram_after = get_vram_usage()
         print(f"[{stage_name}] VRAM: {vram_before:.0f}MB -> {vram_after:.0f}MB")
 

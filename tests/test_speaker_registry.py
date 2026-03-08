@@ -60,7 +60,7 @@ class TestEnrollSpeaker:
                 sys.modules,
                 {"pyannote": MagicMock(), "pyannote.audio": mock_pyannote_audio},
             ),
-            patch("src.gpu_utils.unload_model"),
+            patch("src.gpu_utils.force_gpu_cleanup"),
         ):
             enroll_speaker("Alice", [str(audio_file)], registry_config)
 
@@ -94,7 +94,7 @@ class TestEnrollSpeaker:
                 sys.modules,
                 {"pyannote": MagicMock(), "pyannote.audio": mock_pyannote_audio},
             ),
-            patch("src.gpu_utils.unload_model"),
+            patch("src.gpu_utils.force_gpu_cleanup"),
         ):
             enroll_speaker("Bob", [str(audio1), str(audio2)], registry_config)
 

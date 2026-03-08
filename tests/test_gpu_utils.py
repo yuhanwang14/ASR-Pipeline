@@ -6,43 +6,32 @@ import pytest
 
 from src.gpu_utils import (
     check_vram_available,
+    force_gpu_cleanup,
     get_vram_usage,
     gpu_stage,
     log_vram,
-    unload_model,
 )
 
 
-class TestUnloadModel:
-    """Test unload_model function."""
+class TestForceGpuCleanup:
+    """Test force_gpu_cleanup function."""
 
-    def test_unload_model_deletes_models(self):
-        """Test that unload_model deletes models and collects garbage."""
-        model = MagicMock()
+    def test_calls_gc_collect(self):
+        """Test that force_gpu_cleanup calls gc.collect."""
         with patch("torch.cuda.is_available", return_value=False):
             with patch("gc.collect") as mock_collect:
-                unload_model(model)
+                force_gpu_cleanup()
                 mock_collect.assert_called_once()
 
-    def test_unload_model_with_cuda(self):
-        """Test unload_model with CUDA available."""
-        model = MagicMock()
+    def test_with_cuda(self):
+        """Test force_gpu_cleanup with CUDA available."""
         with patch("torch.cuda.is_available", return_value=True):
             with patch("torch.cuda.empty_cache") as mock_empty:
                 with patch("torch.cuda.synchronize") as mock_sync:
                     with patch("gc.collect"):
-                        unload_model(model)
+                        force_gpu_cleanup()
                         mock_empty.assert_called_once()
                         mock_sync.assert_called_once()
-
-    def test_unload_multiple_models(self):
-        """Test unloading multiple models."""
-        model1 = MagicMock()
-        model2 = MagicMock()
-        with patch("torch.cuda.is_available", return_value=False):
-            with patch("gc.collect"):
-                unload_model(model1, model2)
-                # Both should be in scope (no exception)
 
 
 class TestGetVramUsage:
@@ -91,9 +80,10 @@ class TestGpuStageContext:
         """Test that gpu_stage checks VRAM on entry."""
         with patch("src.gpu_utils.check_vram_available") as mock_check:
             with patch("src.gpu_utils.get_vram_usage", return_value=100.0):
-                with gpu_stage("test", 500):
-                    pass
-                mock_check.assert_called_once_with(500)
+                with patch("src.gpu_utils.force_gpu_cleanup"):
+                    with gpu_stage("test", 500):
+                        pass
+                    mock_check.assert_called_once_with(500)
 
     def test_gpu_stage_raises_on_insufficient_vram(self):
         """Test that gpu_stage raises on insufficient VRAM."""
@@ -105,16 +95,26 @@ class TestGpuStageContext:
                 with gpu_stage("test", 500):
                     pass
 
+    def test_gpu_stage_calls_cleanup_on_exit(self):
+        """Test that gpu_stage calls force_gpu_cleanup in finally block."""
+        with patch("src.gpu_utils.check_vram_available"):
+            with patch("src.gpu_utils.get_vram_usage", return_value=100.0):
+                with patch("src.gpu_utils.force_gpu_cleanup") as mock_cleanup:
+                    with gpu_stage("test", 500):
+                        pass
+                    mock_cleanup.assert_called_once()
+
     def test_gpu_stage_logs_vram_after_exit(self, capsys):
         """Test that gpu_stage logs VRAM after exiting."""
         with patch("src.gpu_utils.check_vram_available"):
             with patch("src.gpu_utils.get_vram_usage", side_effect=[100.0, 150.0]):
-                with gpu_stage("test", 500):
-                    pass
-                captured = capsys.readouterr()
-                assert "test" in captured.out
-                assert "100" in captured.out
-                assert "150" in captured.out
+                with patch("src.gpu_utils.force_gpu_cleanup"):
+                    with gpu_stage("test", 500):
+                        pass
+                    captured = capsys.readouterr()
+                    assert "test" in captured.out
+                    assert "100" in captured.out
+                    assert "150" in captured.out
 
 
 class TestLogVram:

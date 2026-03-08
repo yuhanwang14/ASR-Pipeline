@@ -1,7 +1,5 @@
 """Stage 0: Voice Activity Detection using Silero VAD."""
 
-import torch
-
 from src.timestamp_utils import merge_close_segments
 
 
@@ -74,6 +72,8 @@ def run_vad(waveform, sample_rate: int, config: dict) -> tuple:
         clean_offset += segment_duration
 
     # Concatenate all speech segments
+    import torch
+
     if clean_parts:
         clean_waveform = torch.cat(clean_parts, dim=1)
     else:

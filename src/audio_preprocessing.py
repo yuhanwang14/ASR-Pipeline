@@ -1,11 +1,37 @@
 """Audio loading, resampling, and preprocessing."""
 
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import torch
+if TYPE_CHECKING:
+    import torch
 
 
-def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
+def _load_with_ffmpeg(path: Path):
+    """Load audio via ffmpeg subprocess for formats soundfile can't handle (m4a, mp4, etc.)."""
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp_wav = Path(f.name)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(path), "-ar", "16000", "-ac", "1", str(tmp_wav)],
+            capture_output=True,
+            check=True,
+        )
+        import soundfile as sf
+
+        data, sample_rate = sf.read(str(tmp_wav), dtype="float32")
+    finally:
+        if tmp_wav.exists():
+            tmp_wav.unlink()
+    return data, sample_rate
+
+
+def load_audio(path: str | Path) -> tuple:  # -> tuple[torch.Tensor, int]
     """
     Load audio from file, convert to 16kHz mono, normalize to [-1, 1].
 
@@ -27,8 +53,13 @@ def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
     if not path.exists():
         raise FileNotFoundError(f"Audio file not found: {path}")
 
-    # Load audio via soundfile (avoids torchaudio TorchCodec/FFmpeg issues)
-    data, sample_rate = sf.read(str(path), dtype="float32")
+    import torch
+
+    # Try soundfile first (fast, no ffmpeg dep), fall back to ffmpeg for m4a/mp4/etc.
+    try:
+        data, sample_rate = sf.read(str(path), dtype="float32")
+    except sf.LibsndfileError:
+        data, sample_rate = _load_with_ffmpeg(path)
     # data shape: (N,) for mono, (N, channels) for multi-channel
     if data.ndim == 1:
         waveform = torch.from_numpy(data).unsqueeze(0)  # (1, N)
