@@ -25,11 +25,6 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
 
-[project.urls]
-Homepage = "https://github.com/yuhanwang14/ASR-Pipeline"
-Repository = "https://github.com/yuhanwang14/ASR-Pipeline"
-Issues = "https://github.com/yuhanwang14/ASR-Pipeline/issues"
-
 dependencies = [
     # Audio processing
     "torch>=2.0",
@@ -54,6 +49,11 @@ dependencies = [
     "scipy",
     "huggingface-hub",
 ]
+
+[project.urls]
+Homepage = "https://github.com/yuhanwang14/ASR-Pipeline"
+Repository = "https://github.com/yuhanwang14/ASR-Pipeline"
+Issues = "https://github.com/yuhanwang14/ASR-Pipeline/issues"
 
 [project.optional-dependencies]
 minimal = [
